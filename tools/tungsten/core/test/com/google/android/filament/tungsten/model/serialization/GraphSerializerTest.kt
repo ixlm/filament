@@ -16,9 +16,13 @@
 
 package com.google.android.filament.tungsten.model.serialization
 
+import com.google.android.filament.tungsten.model.Float3
 import com.google.android.filament.tungsten.model.Graph
 import com.google.android.filament.tungsten.model.Node
 import com.google.android.filament.tungsten.model.NodeId
+import com.google.android.filament.tungsten.model.Property
+import com.google.android.filament.tungsten.model.copyPropertyWithValue
+import com.google.android.filament.tungsten.properties.ColorChooser
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -93,8 +97,34 @@ class GraphSerializerTest {
         assertEquals(0, deserialized.connections.size)
     }
 
-    private fun createMockNode(id: NodeId): Node {
-        return Node(id = id, type = "node",
-                inputSlots = listOf("input"), outputSlots = listOf("output"))
+    @Test
+    fun `Serialize a property`() {
+        val node = createMockNode(0).copy()
+
+        // Create a graph with a non-default property value
+        val graph = Graph(
+                nodes = listOf(node),
+                rootNodeId = 0
+        ).graphByChangingProperty(node.getPropertyHandle("mockProperty"),
+                copyPropertyWithValue(mockProperty, Float3(1.0f, 2.0f, 3.0f)))
+
+        val serialized = GraphSerializer.serialize(graph, emptyMap())
+        val (deserialized, _) = GraphSerializer.deserialize(serialized, mockNodeFactory)
+
+        assertEquals(graph, deserialized)
     }
+
+    private val mockProperty = Property(
+        name = "mockProperty",
+        value = Float3(),
+        editorFactory = ::ColorChooser
+    )
+
+    private fun createMockNode(id: NodeId) = Node(
+        id = id,
+        type = "node",
+        inputSlots = listOf("input"),
+        outputSlots = listOf("output"),
+        properties = listOf(mockProperty)
+    )
 }

@@ -15,35 +15,40 @@
  */
 
 #include <iostream>
+#include <random>
 
 #include <gtest/gtest.h>
 
 #include <math/vec3.h>
 #include <math/vec4.h>
+#include <math/mat3.h>
 #include <math/mat4.h>
+#include <math/scalar.h>
 
+#include <filament/Box.h>
 #include <filament/Camera.h>
 #include <filament/Color.h>
 #include <filament/Frustum.h>
 #include <filament/Material.h>
 #include <filament/Engine.h>
 
-#include "driver/UniformBuffer.h"
-#include <filament/UniformInterfaceBlock.h>
+#include <private/filament/UniformInterfaceBlock.h>
+#include <private/filament/UibGenerator.h>
 
 #include "details/Allocators.h"
 #include "details/Material.h"
 #include "details/Camera.h"
 #include "details/Froxelizer.h"
 #include "details/Engine.h"
+#include "components/RenderableManager.h"
 #include "components/TransformManager.h"
-#include "utils/RangeSet.h"
+#include "UniformBuffer.h"
 
 using namespace filament;
-using namespace math;
+using namespace filament::math;
 using namespace utils;
 
-static bool isGray(math::float3 v) {
+static bool isGray(float3 v) {
     return v.r == v.g && v.g == v.b;
 }
 
@@ -53,10 +58,124 @@ static bool almostEqualUlps(float a, float b, int maxUlps) {
     return intDiff <= maxUlps;
 }
 
-static bool vec3eq(math::float3 a, math::float3 b) {
+static bool vec3eq(float3 a, float3 b) {
     return  almostEqualUlps(a.x, b.x, 1) &&
             almostEqualUlps(a.y, b.y, 1) &&
             almostEqualUlps(a.z, b.z, 1);
+}
+
+TEST(FilamentTest, AabbMath) {
+    constexpr Aabb aabb = {{4, 5, 6}, {12, 14, 11}};
+
+    const mat4f m(mat3f::rotation(F_PI_2, float3 {0, 0, 1}), float3 {-4, -5, -6});
+    const Aabb result = aabb.transform(m);
+
+    // Compare Arvo's method (above) with the naive method (below).
+    const float3 a = (m * float4(aabb.min.x, aabb.min.y, aabb.min.z, 1.0)).xyz;
+    const float3 b = (m * float4(aabb.min.x, aabb.min.y, aabb.max.z, 1.0)).xyz;
+    const float3 c = (m * float4(aabb.min.x, aabb.max.y, aabb.min.z, 1.0)).xyz;
+    const float3 d = (m * float4(aabb.min.x, aabb.max.y, aabb.max.z, 1.0)).xyz;
+    const float3 e = (m * float4(aabb.max.x, aabb.min.y, aabb.min.z, 1.0)).xyz;
+    const float3 f = (m * float4(aabb.max.x, aabb.min.y, aabb.max.z, 1.0)).xyz;
+    const float3 g = (m * float4(aabb.max.x, aabb.max.y, aabb.min.z, 1.0)).xyz;
+    const float3 h = (m * float4(aabb.max.x, aabb.max.y, aabb.max.z, 1.0)).xyz;
+    const Aabb expected {
+        .min = min(min(min(min(min(min(min(a, b), c), d), e), f), g), h),
+        .max = max(max(max(max(max(max(max(a, b), c), d), e), f), g), h),
+    };
+
+    EXPECT_PRED2(vec3eq, result.min, expected.min);
+    EXPECT_PRED2(vec3eq, result.max, expected.max);
+}
+
+TEST(FilamentTest, SkinningMath) {
+
+    struct Bone {
+        quatf q;
+        float4 t;
+        float4 s;
+    };
+
+    auto makeBone = [&](mat4f m) -> Bone {
+        // figure out the scales
+        float4 s = { length(m[0]), length(m[1]), length(m[2]), 0.0f };
+        if (dot(cross(m[0].xyz, m[1].xyz), m[2].xyz) < 0) {
+            s[2] = -s[2];
+        }
+
+        // compute the inverse scales
+        float4 is = { 1.0f/s.x, 1.0f/s.y, 1.0f/s.z, 0.0f };
+
+        // normalize the matrix
+        m[0] *= is[0];
+        m[1] *= is[1];
+        m[2] *= is[2];
+
+
+        Bone bone;
+        bone.s = s;
+        bone.q = m.toQuaternion();
+        bone.t = m[3];
+        return bone;
+    };
+
+    auto applyBone = [](Bone const& bone, float3 v) -> float3 {
+        float4 q = bone.q.xyzw;
+        float3 t = bone.t.xyz;
+        float3 s = bone.s.xyz;
+
+        // apply the non-uniform scales
+        v *= s;
+
+        // apply the rigid transform (valid only for unit quaternions)
+        v += 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+
+        // apply the translation
+        v += t;
+
+        return v;
+    };
+
+    auto check = [&](mat4f m, float3 v) {
+        float3 expect = (m * v).xyz;
+        float3 actual = applyBone(makeBone(m), v);
+        static constexpr float value_eps = 40 * std::numeric_limits<float>::epsilon();
+        EXPECT_NEAR(expect.x, actual.x, value_eps);
+        EXPECT_NEAR(expect.y, actual.y, value_eps);
+        EXPECT_NEAR(expect.z, actual.z, value_eps);
+    };
+
+    mat4f m;
+    float3 v = {1, 2, 3};
+
+    m = mat4f::translation(float3{1, 2, 3});
+    check(m, v);
+
+    m = mat4f::scaling(float3{1, 2, 3});
+    check(m, v);
+
+    m = mat4f::scaling(float3{1, 2, 3}) * mat4f::translation(float3{1, 2, 3});
+    check(m, v);
+
+    m = mat4f::translation(float3{1, 2, 3}) * mat4f::scaling(float3{1, 2, 3});
+    check(m, v);
+
+    m = mat4f::translation(float3{1, 2, 3}) * mat4f::scaling(float3{1, -4, 1});
+    check(m, v);
+
+
+    std::default_random_engine generator(82828); // NOLINT
+    std::uniform_real_distribution<float> distribution(-4, 4);
+    std::uniform_real_distribution<float> dangle(-2.0 * F_PI, 2.0 * F_PI);
+    auto rand_gen = std::bind(distribution, generator);
+
+    for (size_t i = 0; i < 100; ++i) {
+        m =
+                mat4f::translation(float3{rand_gen(), rand_gen(), rand_gen()}) *
+                mat4f::rotation(dangle(generator), normalize(float3{rand_gen(), rand_gen(), rand_gen()})) *
+                mat4f::scaling(float3{rand_gen(), rand_gen(), rand_gen()});
+        check(m, v);
+    }
 }
 
 TEST(FilamentTest, TransformManager) {
@@ -96,7 +215,7 @@ TEST(FilamentTest, TransformManager) {
     tcm.openLocalTransformTransaction();
     tcm.setTransform(parent, mat4f{ float4{ 4 }});
 
-    // check the transfroms ARE NOT propagated
+    // check the transforms ARE NOT propagated
     EXPECT_EQ(tcm.getTransform(parent), mat4f{ float4{ 4 }});
     EXPECT_EQ(tcm.getWorldTransform(parent), mat4f{ float4{ 2 }});
     EXPECT_EQ(tcm.getTransform(child), mat4f{ float4{ 1 }});
@@ -124,7 +243,7 @@ TEST(FilamentTest, TransformManager) {
     // make sure child/parent are out of order
     ASSERT_LT(child, newParent);
 
-    // local transaction reprders parent/child
+    // local transaction reorders parent/child
     tcm.openLocalTransformTransaction();
     tcm.setTransform(newParent, mat4f{ float4{ 8 }});
     tcm.commitLocalTransformTransaction();
@@ -142,6 +261,19 @@ TEST(FilamentTest, TransformManager) {
     EXPECT_EQ(tcm.getWorldTransform(newParent), mat4f{ float4{ 8 }});
     EXPECT_EQ(tcm.getTransform(child), mat4f{ float4{ 1 }});
     EXPECT_EQ(tcm.getWorldTransform(child), mat4f{ float4{ 8 }});
+
+    // check children iterators
+    size_t c = 0;
+    auto first = tcm.getChildrenBegin(newParent);
+    auto last = tcm.getChildrenEnd(newParent);
+    while (first != last) {
+        ++first;
+        c++;
+    }
+
+    EXPECT_EQ(tcm.getChildrenEnd(parent)++, tcm.getChildrenEnd(parent));
+    EXPECT_EQ(tcm.getChildrenBegin(parent), tcm.getChildrenEnd(parent));
+    EXPECT_EQ(c, tcm.getChildCount(newParent));
 }
 
 TEST(FilamentTest, UniformInterfaceBlock) {
@@ -324,8 +456,48 @@ TEST(FilamentTest, UniformBuffer) {
 
     move = std::move(copy);
     CHECK(&move);
+}
 
-    //buffer.log(std::cout, ib);
+TEST(FilamentTest, UniformBufferSize1) {
+    UniformInterfaceBlock::Builder b;
+    b.name("UniformBufferSize1");
+    b.add("f4a", 1, UniformInterfaceBlock::Type::FLOAT4); // offset = 0
+    b.add("f4b", 1, UniformInterfaceBlock::Type::FLOAT4); // offset = 16
+    b.add("f1a", 1, UniformInterfaceBlock::Type::FLOAT);  // offset = 32
+    b.add("f1b", 1, UniformInterfaceBlock::Type::FLOAT);  // offset = 36
+    UniformInterfaceBlock uib(b.build());
+    UniformBuffer buffer(uib.getSize());
+
+    float4 f4(1.0f);
+    ssize_t f4_offset = uib.getUniformOffset("f4a", 0);
+    buffer.setUniformArray(f4_offset, &f4, 1);
+
+    float f1(1.0f);
+    ssize_t f1_offset = uib.getUniformOffset("f1b", 0);
+    buffer.setUniformArray(f1_offset, &f1, 1);
+
+    buffer.invalidate();
+}
+
+TEST(FilamentTest, UniformBufferSize2) {
+    UniformInterfaceBlock::Builder b;
+    b.name("UniformBufferSize2");
+    b.add("f4a", 1, UniformInterfaceBlock::Type::FLOAT4); // offset = 0
+    b.add("f4b", 1, UniformInterfaceBlock::Type::FLOAT4); // offset = 16
+    b.add("f1a", 1, UniformInterfaceBlock::Type::FLOAT);  // offset = 32
+    b.add("f2a", 1, UniformInterfaceBlock::Type::FLOAT2); // offset = 36
+    UniformInterfaceBlock uib(b.build());
+    UniformBuffer buffer(uib.getSize());
+
+    float4 f4(1.0f);
+    ssize_t f4_offset = uib.getUniformOffset("f4a", 0);
+    buffer.setUniformArray(f4_offset, &f4, 1);
+
+    float2 f2(1.0f);
+    ssize_t f2_offset = uib.getUniformOffset("f2a", 0);
+    buffer.setUniformArray(f2_offset, &f2, 1);
+
+    buffer.invalidate();
 }
 
 TEST(FilamentTest, BoxCulling) {
@@ -422,10 +594,9 @@ TEST(FilamentTest, ColorConversion) {
     EXPECT_PRED2(vec3eq, (sRGBColor{1.0f, 0.0f, 0.0f}),
             Color::toSRGB<ACCURATE>({1.0f, 0.0f, 0.0f}));
 
-    // 0.5 is > 0.5
-    EXPECT_LT((sRGBColor{0.5f, 0.0f, 0.0f}), Color::toSRGB<FAST>({0.5f, 0.0f, 0.0f}));
-    // 0.5 is > 0.5
-    EXPECT_LT((sRGBColor{0.5f, 0.0f, 0.0f}), Color::toSRGB<ACCURATE>({0.5f, 0.0f, 0.0f}));
+    EXPECT_LT((sRGBColor{0.5f, 0.0f, 0.0f}.x), Color::toSRGB<FAST>({0.5f, 0.0f, 0.0f}).x);
+
+    EXPECT_LT((sRGBColor{0.5f, 0.0f, 0.0f}.x), Color::toSRGB<ACCURATE>({0.5f, 0.0f, 0.0f}).x);
 
     EXPECT_PRED1(isGray, Color::toSRGB<FAST>(LinearColor{0.5f}));
     EXPECT_PRED1(isGray, Color::toSRGB<ACCURATE>(LinearColor{0.5f}));
@@ -441,10 +612,10 @@ TEST(FilamentTest, ColorConversion) {
     // 1.0 stays 1.0
     EXPECT_PRED2(vec3eq, (LinearColor{1.0f, 0.0f, 0.0f}), Color::toLinear<ACCURATE>({1.0f, 0.0f, 0.0f}));
 
-    // 0.5 is < 0.5
-    EXPECT_GT((LinearColor{0.5f, 0.0f, 0.0f}), Color::toLinear<FAST>({0.5f, 0.0f, 0.0f}));
-    // 0.5 is < 0.5
-    EXPECT_GT((LinearColor{0.5f, 0.0f, 0.0f}), Color::toLinear<ACCURATE>({0.5f, 0.0f, 0.0f}));
+
+    EXPECT_GT((LinearColor{0.5f, 0.0f, 0.0f}.x), Color::toLinear<FAST>({0.5f, 0.0f, 0.0f}).x);
+
+    EXPECT_GT((LinearColor{0.5f, 0.0f, 0.0f}.x), Color::toLinear<ACCURATE>({0.5f, 0.0f, 0.0f}).x);
 
     EXPECT_PRED1(isGray, Color::toLinear<FAST>(sRGBColor{0.5f}));
     EXPECT_PRED1(isGray, Color::toLinear<ACCURATE>(sRGBColor{0.5f}));
@@ -475,9 +646,9 @@ TEST(FilamentTest, FroxelData) {
     Froxel f = froxelData.getFroxelAt(0,0,0);
 
     // 45-deg plane, with normal pointing outward to the left
-    EXPECT_FLOAT_EQ(-M_SQRT2/2, f.planes[Froxel::LEFT].x);
+    EXPECT_FLOAT_EQ(-F_SQRT2/2, f.planes[Froxel::LEFT].x);
     EXPECT_FLOAT_EQ(         0, f.planes[Froxel::LEFT].y);
-    EXPECT_FLOAT_EQ( M_SQRT2/2, f.planes[Froxel::LEFT].z);
+    EXPECT_FLOAT_EQ( F_SQRT2/2, f.planes[Froxel::LEFT].z);
 
     // the right side of froxel 1 is near 45-deg plane pointing outward to the right
     EXPECT_TRUE(f.planes[Froxel::RIGHT].x > 0);
@@ -486,9 +657,9 @@ TEST(FilamentTest, FroxelData) {
 
     // right side of last horizontal froxel is 45-deg plane pointing outward to the right
     Froxel g = froxelData.getFroxelAt(froxelData.getFroxelCountX()-1,0,0);
-    EXPECT_FLOAT_EQ(M_SQRT2/2, g.planes[Froxel::RIGHT].x);
+    EXPECT_FLOAT_EQ(F_SQRT2/2, g.planes[Froxel::RIGHT].x);
     EXPECT_FLOAT_EQ(        0, g.planes[Froxel::RIGHT].y);
-    EXPECT_FLOAT_EQ(M_SQRT2/2, g.planes[Froxel::RIGHT].z);
+    EXPECT_FLOAT_EQ(F_SQRT2/2, g.planes[Froxel::RIGHT].z);
 
     // first froxel near plane facing us
     EXPECT_FLOAT_EQ(        0, f.planes[Froxel::NEAR].x);
@@ -554,258 +725,143 @@ TEST(FilamentTest, FroxelData) {
     }
 
     froxelData.terminate(engine->getDriverApi());
-    engine->shutdown();
-    delete engine;
+
+    Engine::destroy((Engine **)&engine);
 }
 
-TEST(FilamentTest, RangeSet) {
+TEST(FilamentTest, Bones) {
+    using namespace ::filament::details;
 
-    utils::RangeSet<4> rs;
-    utils::BufferRange const* b = rs.cbegin();
+    struct Shader {
+        static mat3f normal(PerRenderableUibBone const& bone) noexcept {
+            quatf q = bone.q;
+            float3 is = bone.ns.xyz;
+            return mat3f(mat3(q) * mat3::scaling(is));
+        }
+        static  mat4f vertice(PerRenderableUibBone const& bone) noexcept {
+            quatf q = bone.q;
+            float3 t = bone.t.xyz;
+            float3 s = bone.s.xyz;
+            return mat4f(mat4::translation(t) * mat4(q) * mat4::scaling(s));
+        }
+        static float3 normal(float3 n, PerRenderableUibBone const& bone) noexcept {
+            quatf q = bone.q;
+            float3 is = bone.ns.xyz;
+            // apply the inverse of the non-uniform scales
+            n *= is;
+            // apply the rigid transform
+            n += 2.0 * cross(q.xyz, cross(q.xyz, n) + q.w * n);
+            return n;
+        }
+        static  float3 vertice(float3 v, PerRenderableUibBone const& bone) noexcept {
+            quatf q = bone.q;
+            float3 t = bone.t.xyz;
+            float3 s = bone.s.xyz;
+            // apply the non-uniform scales
+            v *= s;
+            // apply the rigid transform
+            v += 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+            // apply the translation
+            v += t;
+            return v;
+        }
+    };
 
-    EXPECT_TRUE(rs.isEmpty());
+    struct Test {
+        static inline double epsilon(double x, double y) {
+            double maxXYOne = std::max({ 1.0, std::fabs(x), std::fabs(y) });
+            return 1e-5 * maxXYOne;
+        }
 
-    // add a range
-    rs.set(10,20);
-    EXPECT_EQ(1, rs.cend() - rs.cbegin());
-    EXPECT_EQ(10, b[0].start);
-    EXPECT_EQ(30, b[0].end);
+        static void expect_eq(mat4f e, mat4f a) noexcept {
+            for (size_t j = 0; j < 4; j++) {
+                for (size_t i = 0; i < 4; i++) {
+                    EXPECT_NEAR(e[i][j], a[i][j], epsilon(e[i][j], a[i][j]));
+                }
+            }
+        }
+        static void expect_eq(mat3f e, mat3f a) noexcept {
+            for (size_t j = 0; j < 3; j++) {
+                for (size_t i = 0; i < 3; i++) {
+                    EXPECT_NEAR(e[i][j], a[i][j], epsilon(e[i][j], a[i][j]));
+                }
+            }
+        }
+        static void expect_eq(float3 e, float3 a) noexcept {
+            for (size_t i = 0; i < 3; i++) {
+                EXPECT_NEAR(e[i], a[i], epsilon(e[i], a[i]));
+            }
+        }
 
-    // add range at the end w/o overlap
-    rs.set(35, 5);
-    EXPECT_EQ(2, rs.cend() - rs.cbegin());
-    EXPECT_EQ(10, b[0].start);
-    EXPECT_EQ(30, b[0].end);
-    EXPECT_EQ(35, b[1].start);
-    EXPECT_EQ(40, b[1].end);
+        static void check(mat4f const& m) noexcept {
+            PerRenderableUibBone b;
+            FRenderableManager::makeBone(&b, m);
 
-    // add range at the end w/o overlap
-    rs.set(60, 10);
-    EXPECT_EQ(3, rs.cend() - rs.cbegin());
-    EXPECT_EQ(10, b[0].start);
-    EXPECT_EQ(30, b[0].end);
-    EXPECT_EQ(35, b[1].start);
-    EXPECT_EQ(40, b[1].end);
-    EXPECT_EQ(60, b[2].start);
-    EXPECT_EQ(70, b[2].end);
+            expect_eq(Shader::vertice(b), m);
 
-    // add range at the begining w/o overlap
-    rs.set(0, 5);
-    EXPECT_EQ(4, rs.cend() - rs.cbegin());
-    EXPECT_EQ( 0, b[0].start);
-    EXPECT_EQ( 5, b[0].end);
-    EXPECT_EQ(10, b[1].start);
-    EXPECT_EQ(30, b[1].end);
-    EXPECT_EQ(35, b[2].start);
-    EXPECT_EQ(40, b[2].end);
-    EXPECT_EQ(60, b[3].start);
-    EXPECT_EQ(70, b[3].end);
+            mat3f n = transpose(inverse(m.upperLeft()));
+            n *= mat3f(1.0f / std::sqrt(max(float3{length2(n[0]), length2(n[1]), length2(n[2])})));
+            expect_eq(Shader::normal(b), n);
+        }
 
-    // test overflow
-    // ... last range
-    rs.set(80, 5);
-    EXPECT_EQ(4, rs.cend() - rs.cbegin());
-    EXPECT_EQ( 0, b[0].start);
-    EXPECT_EQ( 5, b[0].end);
-    EXPECT_EQ(10, b[1].start);
-    EXPECT_EQ(30, b[1].end);
-    EXPECT_EQ(35, b[2].start);
-    EXPECT_EQ(40, b[2].end);
-    EXPECT_EQ(60, b[3].start);
-    EXPECT_EQ(85, b[3].end);
+        static void check(mat4f const& m, float3 const& v) noexcept {
+            PerRenderableUibBone b;
+            FRenderableManager::makeBone(&b, m);
 
-    // ... overlaping begining of a range
-    rs.set(7, 5);
-    EXPECT_EQ(4, rs.cend() - rs.cbegin());
-    EXPECT_EQ( 0, b[0].start);
-    EXPECT_EQ( 5, b[0].end);
-    EXPECT_EQ( 7, b[1].start);
-    EXPECT_EQ(30, b[1].end);
-    EXPECT_EQ(35, b[2].start);
-    EXPECT_EQ(40, b[2].end);
-    EXPECT_EQ(60, b[3].start);
-    EXPECT_EQ(85, b[3].end);
+            expect_eq((m * v).xyz, Shader::vertice(v, b));
 
-    // ... overlapping end of a range
-    // (in that case, we merge with the following range)
-    rs.set(27, 5);
-    EXPECT_EQ(3, rs.cend() - rs.cbegin());
-    EXPECT_EQ( 0, b[0].start);
-    EXPECT_EQ( 5, b[0].end);
-    EXPECT_EQ( 7, b[1].start);
-    EXPECT_EQ(40, b[1].end);
-    EXPECT_EQ(60, b[2].start);
-    EXPECT_EQ(85, b[2].end);
+            mat3f n = transpose(inverse(m.upperLeft()));
+            n *= mat3f(1.0f / std::sqrt(max(float3{length2(n[0]), length2(n[1]), length2(n[2])})));
+            expect_eq(n * normalize(v), Shader::normal(normalize(v), b));
 
-    // test clear
-    rs.clear();
-    EXPECT_EQ(b, rs.cbegin());
-    EXPECT_EQ(b, rs.cend());
+            float3 normal = n * normalize(v);
+            EXPECT_LE(max(abs(normal)), 1.0);
+        }
+    };
 
-    // test fully overlapping
-    rs.set(0, 1000);
-    rs.set(10, 10);
-    rs.set(40, 10);
-    EXPECT_EQ(1, rs.cend() - rs.cbegin());
-    EXPECT_EQ(0, b[0].start);
-    EXPECT_EQ(1000, b[0].end);
+    Test::check(mat4f{});
+    Test::check(mat4f::translation(float3{ 1, 2, 3 }));
 
+    Test::check(mat4f::scaling(float3{ 2, 2, 2 }));
 
-    // test merging at the end
-    rs.set(1000, 100);
-    EXPECT_EQ(1, rs.cend() - rs.cbegin());
-    EXPECT_EQ(0, b[0].start);
-    EXPECT_EQ(1100, b[0].end);
+    Test::check(mat4f::scaling(float3{ 4, 2, 3 }));
+    Test::check(mat4f::scaling(float3{ 4, -2, -3 }));
+    Test::check(mat4f::scaling(float3{ -4, 2, -3 }));
+    Test::check(mat4f::scaling(float3{ -4, -2, 3 }));
 
-    // test merging at the end with overlap
-    rs.set(1000, 200);
-    EXPECT_EQ(1, rs.cend() - rs.cbegin());
-    EXPECT_EQ(0, b[0].start);
-    EXPECT_EQ(1200, b[0].end);
+    Test::check(mat4f::scaling(float3{ -4, -2, -3 }));
+    Test::check(mat4f::scaling(float3{ -4, 2, 3 }));
+    Test::check(mat4f::scaling(float3{ 4, -2, 3 }));
+    Test::check(mat4f::scaling(float3{ 4, 2, -3 }));
 
-    // test merge at the begining
-    rs.clear();
-    rs.set(100, 10);
-    rs.set(50, 50);
-    EXPECT_EQ(1, rs.cend() - rs.cbegin());
-    EXPECT_EQ(50, b[0].start);
-    EXPECT_EQ(110, b[0].end);
+    Test::check(mat4f::rotation(F_PI_2, float3{ 0, 0, 1 }));
+    Test::check(mat4f::rotation(F_PI_2, float3{ 0, 1, 0 }));
+    Test::check(mat4f::rotation(F_PI_2, float3{ 1, 0, 0 }));
+    Test::check(mat4f::rotation(F_PI_2, float3{ 0, 1, 1 }));
+    Test::check(mat4f::rotation(F_PI_2, float3{ 1, 0, 1 }));
+    Test::check(mat4f::rotation(F_PI_2, float3{ 1, 1, 0 }));
+    Test::check(mat4f::rotation(-F_PI_2, float3{ 0, 0, 1 }));
+    Test::check(mat4f::rotation(-F_PI_2, float3{ 0, 1, 0 }));
+    Test::check(mat4f::rotation(-F_PI_2, float3{ 1, 0, 0 }));
+    Test::check(mat4f::rotation(-F_PI_2, float3{ 0, 1, 1 }));
+    Test::check(mat4f::rotation(-F_PI_2, float3{ 1, 0, 1 }));
+    Test::check(mat4f::rotation(-F_PI_2, float3{ 1, 1, 0 }));
 
-    // test merge at the begining with overlap
-    rs.set(40, 40);
-    EXPECT_EQ(1, rs.cend() - rs.cbegin());
-    EXPECT_EQ(40, b[0].start);
-    EXPECT_EQ(110, b[0].end);
+    mat4f m = mat4f::translation(float3{ 1, 2, 3 }) *
+                                                    mat4f::rotation(-F_PI_2, float3{ 1, 1, 0 }) *
+                                                    mat4f::scaling(float3{ -2, 3, 0.04 });
 
-    // test merging a larger range
-    rs.set(0, 1000);
-    EXPECT_EQ(1, rs.cend() - rs.cbegin());
-    EXPECT_EQ(0, b[0].start);
-    EXPECT_EQ(1000, b[0].end);
+    Test::check(m);
 
+    std::default_random_engine generator(82828);
+    std::uniform_real_distribution<float> distribution(-100.0f, 100.0f);
+    auto rand_gen = std::bind(distribution, generator);
 
-    // test merging in the middle
-    rs.clear();
-    rs.set(  0, 50);
-    rs.set(100, 50);
-    rs.set(200, 50);
-    EXPECT_EQ(3, rs.cend() - rs.cbegin());
-    EXPECT_EQ(  0, b[0].start);
-    EXPECT_EQ( 50, b[0].end);
-    EXPECT_EQ(100, b[1].start);
-    EXPECT_EQ(150, b[1].end);
-    EXPECT_EQ(200, b[2].start);
-    EXPECT_EQ(250, b[2].end);
-
-    // ... to the left w/ overlap
-    rs.set(90, 20);
-    EXPECT_EQ(3, rs.cend() - rs.cbegin());
-    EXPECT_EQ(  0, b[0].start);
-    EXPECT_EQ( 50, b[0].end);
-    EXPECT_EQ( 90, b[1].start);
-    EXPECT_EQ(150, b[1].end);
-    EXPECT_EQ(200, b[2].start);
-    EXPECT_EQ(250, b[2].end);
-
-    // ... to the left w/o overlap
-    rs.set(80, 10);
-    EXPECT_EQ(3, rs.cend() - rs.cbegin());
-    EXPECT_EQ(  0, b[0].start);
-    EXPECT_EQ( 50, b[0].end);
-    EXPECT_EQ( 80, b[1].start);
-    EXPECT_EQ(150, b[1].end);
-    EXPECT_EQ(200, b[2].start);
-    EXPECT_EQ(250, b[2].end);
-
-    // ... to the right w/ overlap
-    rs.set(140, 20);
-    EXPECT_EQ(3, rs.cend() - rs.cbegin());
-    EXPECT_EQ(  0, b[0].start);
-    EXPECT_EQ( 50, b[0].end);
-    EXPECT_EQ( 80, b[1].start);
-    EXPECT_EQ(160, b[1].end);
-    EXPECT_EQ(200, b[2].start);
-    EXPECT_EQ(250, b[2].end);
-
-    // ... to the right w/o overlap
-    rs.set(160, 10);
-    EXPECT_EQ(3, rs.cend() - rs.cbegin());
-    EXPECT_EQ(  0, b[0].start);
-    EXPECT_EQ( 50, b[0].end);
-    EXPECT_EQ( 80, b[1].start);
-    EXPECT_EQ(170, b[1].end);
-    EXPECT_EQ(200, b[2].start);
-    EXPECT_EQ(250, b[2].end);
-
-    // fill a gap w/o overlap
-    rs.set(50, 30);
-    EXPECT_EQ(2, rs.cend() - rs.cbegin());
-    EXPECT_EQ(  0, b[0].start);
-    EXPECT_EQ(170, b[0].end);
-    EXPECT_EQ(200, b[1].start);
-    EXPECT_EQ(250, b[1].end);
-
-    // fill a gap w/ overlap
-    rs.set(150, 60);
-    EXPECT_EQ(1, rs.cend() - rs.cbegin());
-    EXPECT_EQ(  0, b[0].start);
-    EXPECT_EQ(250, b[0].end);
-
-    // overlap 2 different range swallow the middle one
-    rs.clear();
-    rs.set(  0, 50);
-    rs.set(100, 50);
-    rs.set(200, 50);
-    rs.set(25, 200);
-    EXPECT_EQ(1, rs.cend() - rs.cbegin());
-    EXPECT_EQ(  0, b[0].start);
-    EXPECT_EQ(250, b[0].end);
-
-
-    // test matching start and/or ends
-    rs.clear();
-    rs.set(  0, 50);
-    rs.set(100, 50);
-    rs.set(200, 50);
-    EXPECT_EQ(3, rs.cend() - rs.cbegin());
-    EXPECT_EQ(  0, b[0].start);
-    EXPECT_EQ( 50, b[0].end);
-    EXPECT_EQ(100, b[1].start);
-    EXPECT_EQ(150, b[1].end);
-    EXPECT_EQ(200, b[2].start);
-    EXPECT_EQ(250, b[2].end);
-
-    // ... match begin
-    rs.set(100, 10);
-    EXPECT_EQ(3, rs.cend() - rs.cbegin());
-    EXPECT_EQ(  0, b[0].start);
-    EXPECT_EQ( 50, b[0].end);
-    EXPECT_EQ(100, b[1].start);
-    EXPECT_EQ(150, b[1].end);
-    EXPECT_EQ(200, b[2].start);
-    EXPECT_EQ(250, b[2].end);
-
-    // ... match end
-    rs.set(140, 10);
-    EXPECT_EQ(3, rs.cend() - rs.cbegin());
-    EXPECT_EQ(  0, b[0].start);
-    EXPECT_EQ( 50, b[0].end);
-    EXPECT_EQ(100, b[1].start);
-    EXPECT_EQ(150, b[1].end);
-    EXPECT_EQ(200, b[2].start);
-    EXPECT_EQ(250, b[2].end);
-
-    // ... match both
-    rs.set(100, 50);
-    EXPECT_EQ(3, rs.cend() - rs.cbegin());
-    EXPECT_EQ(  0, b[0].start);
-    EXPECT_EQ( 50, b[0].end);
-    EXPECT_EQ(100, b[1].start);
-    EXPECT_EQ(150, b[1].end);
-    EXPECT_EQ(200, b[2].start);
-    EXPECT_EQ(250, b[2].end);
+    for (size_t i = 0; i < 100; ++i) {
+        float3 p(rand_gen(), rand_gen(), rand_gen());
+        Test::check(m, p);
+    }
 }
-
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

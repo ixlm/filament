@@ -16,8 +16,28 @@ float luminance(const vec3 linear) {
  * Computes the pre-exposed intensity using the specified intensity and exposure.
  * This function exists to force highp precision on the two parameters
  */
-float computePreExposedIntensity(const HIGHP float intensity, const HIGHP float exposure) {
+float computePreExposedIntensity(const highp float intensity, const highp float exposure) {
     return intensity * exposure;
+}
+
+void unpremultiply(inout vec4 color) {
+    color.rgb /= max(color.a, FLT_EPS);
+}
+
+/**
+ * Applies a full range YCbCr to sRGB conversion and returns an RGB color.
+ *
+ * @public-api
+ */
+vec3 ycbcrToRgb(float luminance, vec2 cbcr) {
+    // Taken from https://developer.apple.com/documentation/arkit/arframe/2867984-capturedimage
+    const mat4 ycbcrToRgbTransform = mat4(
+        1.0000, 1.0000, 1.0000, 0.0000,
+        0.0000, -0.3441, 1.7720, 0.0000,
+        1.4020, -0.7141, 0.0000, 0.0000,
+        -0.7010, 0.5291, -0.8860, 1.0000
+    );
+    return (ycbcrToRgbTransform * vec4(luminance, cbcr, 1.0)).rgb;
 }
 
 //------------------------------------------------------------------------------
@@ -33,8 +53,8 @@ vec3 Inverse_Tonemap_Unreal(const vec3 x) {
 
 /**
  * Applies the inverse of the tone mapping operator to the specified HDR or LDR
- * sRGB (non-linear) color. The inverse tone mapping operator may be an
- * approximation of the real inverse operation.
+ * sRGB (non-linear) color and returns a linear sRGB color. The inverse tone mapping
+ * operator may be an approximation of the real inverse operation.
  *
  * @public-api
  */
@@ -46,8 +66,8 @@ vec3 inverseTonemapSRGB(vec3 color) {
 
 /**
  * Applies the inverse of the tone mapping operator to the specified HDR or LDR
- * linear RGB color. The inverse tone mapping operator may be an approximation of
- * the real inverse operation.
+ * linear RGB color and returns a linear RGB color. The inverse tone mapping operator
+ * may be an approximation of the real inverse operation.
  *
  * @public-api
  */

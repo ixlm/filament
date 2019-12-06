@@ -17,7 +17,7 @@
 #include "components/TransformManager.h"
 
 using namespace utils;
-using namespace math;
+using namespace filament::math;
 
 namespace filament {
 namespace details {
@@ -69,6 +69,37 @@ void FTransformManager::setParent(Instance i, Instance parent) noexcept {
     }
 }
 
+Entity FTransformManager::getParent(Instance i) const noexcept {
+    i = mManager[i].parent;
+    return i ? mManager.getEntity(i) : Entity();
+}
+
+size_t FTransformManager::getChildCount(Instance i) const noexcept {
+    size_t count = 0;
+    for (Instance ci = mManager[i].firstChild; ci; ci = mManager[ci].next, ++count);
+    return count;
+}
+
+size_t FTransformManager::getChildren(Instance i, utils::Entity* children,
+        size_t count) const noexcept {
+    Instance ci = mManager[i].firstChild;
+    size_t numWritten = 0;
+    while (ci && numWritten < count) {
+        children[numWritten++] = mManager.getEntity(ci);
+        ci = mManager[ci].next;
+    }
+    return numWritten;
+}
+
+TransformManager::children_iterator FTransformManager::getChildrenBegin(
+        Instance parent) const noexcept {
+    return { *this, mManager[parent].firstChild };
+}
+
+TransformManager::children_iterator FTransformManager::getChildrenEnd(Instance) const noexcept {
+    return { *this, 0 };
+}
+
 void FTransformManager::destroy(Entity e) noexcept {
     // update the reference of the element we're removing
     auto& manager = mManager;
@@ -106,22 +137,13 @@ void FTransformManager::setTransform(Instance ci, const mat4f& model) noexcept {
 }
 
 void FTransformManager::updateNodeTransform(Instance i) noexcept {
+    if (UTILS_UNLIKELY(mLocalTransformTransactionOpen)) {
+        return;
+    }
+
     validateNode(i);
     auto& manager = mManager;
     assert(i);
-
-    if (UTILS_UNLIKELY(mLocalTransformTransactionOpen)) {
-        // don't update the world transform until commitLocalTransformTransaction() is called
-        Instance ci = manager[i].firstChild;
-        while (ci) {
-            Instance child = manager[ci].firstChild;
-            ci = manager[ci].next;
-            if (child) {
-                updateNodeTransform(child);
-            }
-        }
-        return;
-    }
 
     // find our parent's world transform, if any
     // note: by using the raw_array() we don't need to check that parent is valid.
@@ -173,7 +195,7 @@ void FTransformManager::insertNode(Instance i, Instance parent) noexcept {
     manager[i].parent = parent;
     manager[i].prev = 0;
     if (parent) {
-        // we insert ourself first in the parent's list
+        // we insert ourselves first in the parent's list
         Instance next = manager[parent].firstChild;
         manager[i].next = next;
         // we're our parent's first child now
@@ -353,12 +375,17 @@ void FTransformManager::gc(utils::EntityManager& em) noexcept {
 
 } // namespace details
 
+using namespace details;
+
+TransformManager::children_iterator& TransformManager::children_iterator::operator++() {
+    FTransformManager const& that = upcast(mManager);
+    mInstance = that.mManager[mInstance].next;
+    return *this;
+}
 
 // ------------------------------------------------------------------------------------------------
 // Trampoline calling into private implementation
 // ------------------------------------------------------------------------------------------------
-
-using namespace details;
 
 void TransformManager::create(Entity entity, Instance parent, const mat4f& worldTransform) {
     upcast(this)->create(entity, parent, worldTransform);
@@ -392,12 +419,35 @@ void TransformManager::setParent(Instance i, Instance newParent) noexcept {
     upcast(this)->setParent(i, newParent);
 }
 
+utils::Entity TransformManager::getParent(Instance i) const noexcept {
+    return upcast(this)->getParent(i);
+}
+
+size_t TransformManager::getChildCount(Instance i) const noexcept {
+    return upcast(this)->getChildCount(i);
+}
+
+size_t TransformManager::getChildren(Instance i, utils::Entity* children,
+        size_t count) const noexcept {
+    return upcast(this)->getChildren(i, children, count);
+}
+
 void TransformManager::openLocalTransformTransaction() noexcept {
     upcast(this)->openLocalTransformTransaction();
 }
 
 void TransformManager::commitLocalTransformTransaction() noexcept {
     upcast(this)->commitLocalTransformTransaction();
+}
+
+TransformManager::children_iterator TransformManager::getChildrenBegin(
+        TransformManager::Instance parent) const noexcept {
+    return upcast(this)->getChildrenBegin(parent);
+}
+
+TransformManager::children_iterator TransformManager::getChildrenEnd(
+        TransformManager::Instance parent) const noexcept {
+    return upcast(this)->getChildrenEnd(parent);
 }
 
 } // namespace filament

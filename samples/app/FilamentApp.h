@@ -57,6 +57,7 @@ public:
             filament::Scene*, filament::Renderer*)>;
     using ImGuiCallback = std::function<void(filament::Engine*, filament::View*)>;
     using AnimCallback = std::function<void(filament::Engine*, filament::View*, double now)>;
+    using DropCallback = std::function<void(std::string)>;
 
     static FilamentApp& get();
 
@@ -64,27 +65,40 @@ public:
 
     void animate(AnimCallback animation) { mAnimation = animation; }
 
+    void setDropHandler(DropCallback handler) { mDropHandler = handler; }
+
     void run(const Config& config, SetupCallback setup, CleanupCallback cleanup,
             ImGuiCallback imgui = ImGuiCallback(), PreRenderCallback preRender = PreRenderCallback(),
             PostRenderCallback postRender = PostRenderCallback(),
             size_t width = 1024, size_t height = 640);
 
+    filament::Material const* getDefaultMaterial() const noexcept { return mDefaultMaterial; }
     filament::Material const* getTransparentMaterial() const noexcept { return mTransparentMaterial; }
     IBL* getIBL() const noexcept { return mIBL.get(); }
+    filament::View* getGuiView() const noexcept;
 
     void close() { mClosed = true; }
+
+    void setSidebarWidth(int width) { mSidebarWidth = width; }
+    void setWindowTitle(const char* title) { mWindowTitle = title; }
+
+    void addOffscreenView(filament::View* view) { mOffscreenViews.push_back(view); }
+
+    size_t getSkippedFrameCount() const { return mSkippedFrames; }
 
     FilamentApp(const FilamentApp& rhs) = delete;
     FilamentApp(FilamentApp&& rhs) = delete;
     FilamentApp& operator=(const FilamentApp& rhs) = delete;
     FilamentApp& operator=(FilamentApp&& rhs) = delete;
 
-    // Returns the path to the Filament root for loading assets. This is determined from the
-    // executable folder, which allows users to launch samples from any folder.
-    static const utils::Path& getRootPath() {
-        static const utils::Path root = utils::Path::getCurrentExecutable().getParent();
-        return root;
-    }
+    /**
+     * Returns the path to the Filament root for loading assets. This is determined from the
+     * executable folder, which allows users to launch samples from any folder.
+     *
+     * This takes into account multi-configuration CMake generators, like Visual Studio or Xcode,
+     * that have different executable paths compared to single-configuration generators, like Ninja.
+     */
+    static const utils::Path& getRootAssetsPath();
 
 private:
     FilamentApp();
@@ -107,8 +121,6 @@ private:
         filament::View const* getView() const { return view; }
         filament::View* getView() { return view; }
 
-        CameraManipulator* getCameraManipulator() const { return mCameraManipulator; }
-
     private:
         enum class Mode : uint8_t {
             NONE, ROTATE, TRACK
@@ -118,7 +130,7 @@ private:
         filament::Viewport mViewport;
         filament::View* view = nullptr;
         CameraManipulator* mCameraManipulator = nullptr;
-        math::double2 mLastMousePosition;
+        filament::math::double2 mLastMousePosition;
         Mode mMode = Mode::NONE;
         std::string mName;
     };
@@ -156,9 +168,9 @@ private:
         SDL_Window* mWindow = nullptr;
         FilamentApp* mFilamentApp = nullptr;
         filament::Renderer* mRenderer = nullptr;
+        filament::Engine::Backend mBackend;
 
         CameraManipulator mMainCameraMan;
-        CameraManipulator mOrthoCameraMan;
         CameraManipulator mDebugCameraMan;
         filament::SwapChain* mSwapChain = nullptr;
 
@@ -193,11 +205,17 @@ private:
     bool mClosed = false;
     uint64_t mTime = 0;
 
+    filament::Material const* mDefaultMaterial = nullptr;
     filament::Material const* mTransparentMaterial = nullptr;
     filament::Material const* mDepthMaterial = nullptr;
     filament::MaterialInstance* mDepthMI = nullptr;
     std::unique_ptr<filagui::ImGuiHelper> mImGuiHelper;
     AnimCallback mAnimation;
+    DropCallback mDropHandler;
+    int mSidebarWidth = 0;
+    size_t mSkippedFrames = 0;
+    std::string mWindowTitle;
+    std::vector<filament::View*> mOffscreenViews;
 };
 
 #endif // TNT_FILAMENT_SAMPLE_FILAMENTAPP_H

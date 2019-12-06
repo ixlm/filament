@@ -16,15 +16,18 @@
 
 package com.google.android.filament.tungsten.compiler;
 
-import com.google.android.filament.tungsten.model.Connection;
 import com.google.android.filament.tungsten.model.Graph;
 import com.google.android.filament.tungsten.model.Node;
+import com.google.android.filament.tungsten.model.Slot;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -33,30 +36,61 @@ import org.jetbrains.annotations.Nullable;
  */
 public final class GraphCompiler {
 
-    private int mTextureNumber = 1;
+    public enum CodeSection {
+        AFTER_PREPARE_MATERIAL,
+        BEFORE_PREPARE_MATERIAL
+    }
+
+    // Material function source text before the "prepareMaterial" call
+    private StringBuilder mMaterialFunctionPrologue = new StringBuilder();
+
+    // Material function source text after the "prepareMaterial" call
     private StringBuilder mMaterialFunctionBodyBuilder = new StringBuilder();
+
+    private CodeSection mCurrentCodeSection = CodeSection.AFTER_PREPARE_MATERIAL;
+
     private final List<String> mRequiredAttributes = new ArrayList<>();
+    private String mShadingModel = "unlit";
     private final List<Parameter> mParameters = new ArrayList<>();
+    private final Map<String, Integer> mParameterNumberMap = new HashMap<>();
+    private final Map<Node.PropertyHandle, Parameter> mPropertyParameterMap = new HashMap<>();
     private final LinkedHashMap<String, String> mGlobalFunctions = new LinkedHashMap<>();
     private final Map<String, Integer> mVariableNameMap = new HashMap<>();
 
     private final @NotNull Graph mGraph;
     private final @NotNull Node mRootNode;
-    private final Map<Node.InputSlot, Connection> mConnectionMap = new HashMap<>();
-    private final Map<Node.OutputSlot, Expression> mCompiledVariableMap = new HashMap<>();
+    private final Map<Slot, Expression> mCompiledVariableMap = new HashMap<>();
+    private final Set<Node> mUncompiledNodes;
+    private boolean mShouldAppendCode = true;
+    private final Map<Node, Node> mOldToNewNodeMap = new HashMap<>();
+    private final List<String> validShadingModels =
+            Arrays.asList("lit", "unlit", "cloth", "subsurface");
 
     public GraphCompiler(@NotNull Graph graph) {
         mGraph = graph;
         mRootNode = Objects.requireNonNull(mGraph.getRootNode());
+        mUncompiledNodes = new HashSet<>(graph.getNodes());
     }
 
     @NotNull
-    public String compileGraph() {
-        mRootNode.getCompileFunction().invoke(mRootNode, this);
+    public CompiledGraph compileGraph() {
+        compileNode(mRootNode);
+
+        // Compile the rest of the nodes in the graph that aren't necessarily connected to the
+        // root node. These nodes should not contribute any code to the material definition.
+        mShouldAppendCode = false;
+        while (!mUncompiledNodes.isEmpty()) {
+            Node next = mUncompiledNodes.iterator().next();
+            compileNode(next);
+        }
+
         String fragmentSection = GraphFormatter.formatFragmentSection(mGlobalFunctions.values(),
-                mMaterialFunctionBodyBuilder.toString());
-        return GraphFormatter.formatMaterialSection(mRequiredAttributes, mParameters)
-                + fragmentSection;
+                mMaterialFunctionPrologue.toString(), mMaterialFunctionBodyBuilder.toString());
+        String materialDefinition =
+                GraphFormatter.formatMaterialSection(mRequiredAttributes, mParameters,
+                mShadingModel) + fragmentSection;
+        return new CompiledGraph(materialDefinition, mPropertyParameterMap, mCompiledVariableMap,
+                mOldToNewNodeMap);
     }
 
     /**
@@ -64,7 +98,7 @@ public final class GraphCompiler {
      * @return null, if the InputSlot is not connected to any OutputSlot, otherwise an Expression.
      */
     @Nullable
-    public Expression compileAndRetrieveVariable(@NotNull Node.InputSlot slot) {
+    public Expression compileAndRetrieveExpression(@NotNull Node.InputSlot slot) {
         Node.OutputSlot outputSlot = mGraph.getOutputSlotConnectedToInput(slot);
         if (outputSlot == null) {
             return null;
@@ -81,7 +115,7 @@ public final class GraphCompiler {
         if (connectedNode == null) {
             throw new RuntimeException("Output slot references node that does not exist in graph.");
         }
-        connectedNode.getCompileFunction().invoke(connectedNode, this);
+        compileNode(connectedNode);
 
         // Verify that the connected node has set it's output variable
         compiledExpression = mCompiledVariableMap.get(outputSlot);
@@ -93,8 +127,7 @@ public final class GraphCompiler {
         return compiledExpression;
     }
 
-    public void setExpressionForOutputSlot(@NotNull Node.OutputSlot slot,
-            @NotNull Expression expression) {
+    public void setExpressionForSlot(@NotNull Slot slot, @NotNull Expression expression) {
         mCompiledVariableMap.put(slot, expression);
     }
 
@@ -110,19 +143,35 @@ public final class GraphCompiler {
         }
     }
 
+    public void setShadingModel(String shadingModel) {
+        if (validShadingModels.contains(shadingModel)) {
+            mShadingModel = shadingModel;
+        }
+    }
+
     /**
-     * Called by a NodeModel subclass to add a new material parameter.
+     * Called by a node's compile function to add a new material parameter.
      * The parameter will be added to the material source's "parameters" section.
      *
      * @param type The type of parameter
-     * @return A String representing the name of the parameter variable that the node should use
-     * in its source.
+     * @return A String with the unique name of the parameter that the node should use in code.
      */
-    public String addParameter(String type) {
-        String parameterName = allocateNewParameterName();
-        mParameters.add(new Parameter(type, parameterName));
-        // todo: Handle parameters other than sampler parameters
-        return "materialParams_" + parameterName;
+    @NotNull
+    public Parameter addParameter(@NotNull String type, @NotNull String name) {
+        String parameterName = allocateNewParameterName(name);
+        Parameter parameter = new Parameter(type, parameterName);
+        mParameters.add(parameter);
+        return parameter;
+    }
+
+    /**
+    * Associates a material parameter with a Node's property. After the graph is compiled, this
+    * mapping between parameters and properties is returned so that adjustments to a property
+    * can affect the appropriate material parameter.
+    */
+    public void associateParameterWithProperty(@NotNull Parameter parameter,
+            @NotNull Node.PropertyHandle property) {
+        mPropertyParameterMap.put(property, parameter);
     }
 
     /**
@@ -141,7 +190,23 @@ public final class GraphCompiler {
      * @param code code to be concatenated to the material function body.
      */
     public void addCodeToMaterialFunctionBody(String code) {
-        mMaterialFunctionBodyBuilder.append(code);
+        if (!mShouldAppendCode) {
+            return;
+        }
+        if (mCurrentCodeSection == CodeSection.AFTER_PREPARE_MATERIAL) {
+            mMaterialFunctionBodyBuilder.append(code);
+        } else if (mCurrentCodeSection == CodeSection.BEFORE_PREPARE_MATERIAL) {
+            mMaterialFunctionPrologue.append(code);
+        }
+    }
+
+    /**
+     * Set the state of this GraphCompiler to output code to a specific section of the material
+     * function body: either before the call to prepareMaterial(), or after.
+     * The state persists until setCurrentCodeSection is called again.
+     */
+    public void setCurrentCodeSection(CodeSection section) {
+        mCurrentCodeSection = section;
     }
 
     /**
@@ -184,7 +249,26 @@ public final class GraphCompiler {
         provideFunctionDefinition(symbolName, String.format(format, args));
     }
 
-    private String allocateNewParameterName() {
-        return "texture" + mTextureNumber++;
+    private void compileNode(Node node) {
+        mUncompiledNodes.remove(node);
+        Node newNode = node.getCompileFunction().invoke(node, this);
+
+        // We've received a new node while compiling, take note of it.
+        if (newNode != node) {
+            mOldToNewNodeMap.put(node, newNode);
+        }
+    }
+
+    /**
+     * Appends an integer to a parameter name to ensure globally-unique names.
+     */
+    private String allocateNewParameterName(String name) {
+        Integer parameterNumber =
+                mParameterNumberMap.computeIfPresent(name, (s, integer) -> integer + 1);
+        if (parameterNumber == null) {
+            parameterNumber = 0;
+            mParameterNumberMap.putIfAbsent(name, parameterNumber);
+        }
+        return name + parameterNumber;
     }
 }

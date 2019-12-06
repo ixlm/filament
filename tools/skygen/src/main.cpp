@@ -14,8 +14,7 @@
  * limitations under the License.
  */
 
-#include <stdlib.h>
-
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 
@@ -23,6 +22,7 @@
 #include <math/scalar.h>
 #include <math/vec3.h>
 
+#include <image/ColorTransform.h>
 #include <image/LinearImage.h>
 #include <imageio/ImageEncoder.h>
 
@@ -35,7 +35,7 @@ extern "C" {
 #include <ArHosekSkyModel.h>
 }
 
-using namespace math;
+using namespace filament::math;
 using namespace image;
 using namespace utils;
 
@@ -43,14 +43,14 @@ static const uint32_t DEFAULT_ENV_MAP_WIDTH = 4096;
 
 static ImageEncoder::Format g_format = ImageEncoder::Format::PNG_LINEAR;
 static bool g_formatSpecified = false;
-static std::string g_compression = "";
+static std::string g_compression;
 
 static uint32_t g_outputWidth = DEFAULT_ENV_MAP_WIDTH;
 
 static float  g_turbidity    = 4.0f;          // between 1 and 32
 static float  g_elevation    = 0.785398f;     // sun elevation in radians (45 degrees)
 static float  g_azimuth      = 0.0f;          // sun azimuth in radians (0.0 degrees)
-static float3 g_groundAlbedo = float3{0.9f};  // ground albedo, sRGB
+static float3 g_groundAlbedo = float3{0.25f}; // ground albedo
 static bool   g_normalize    = false;
 static bool   g_tonemap      = false;
 static bool   g_gammaCorrect = false;
@@ -86,8 +86,8 @@ static float angleBetween(float thetav, float phiv, float theta, float phi) {
 
 static void generateSky(LinearImage image) {
     printf("Sky parameters\n");
-    printf("    Elevation: %.2f°\n", g_elevation * 180.0 * M_1_PI);
-    printf("    Azimuth:   %.2f°\n", g_azimuth * 180.0 * M_1_PI);
+    printf("    Elevation: %.2f°\n", g_elevation * 180.0 * F_1_PI);
+    printf("    Azimuth:   %.2f°\n", g_azimuth * 180.0 * F_1_PI);
     printf("    Turbidity: %.2f\n", g_turbidity);
     printf("\n");
 
@@ -95,11 +95,13 @@ static void generateSky(LinearImage image) {
         std::vector<float> maximas;
         std::mutex maximasMutex;
 
-        float solarElevation = clamp(g_elevation, 0.0f, float(M_PI_2));
-        float sunTheta = float(M_PI_2 - solarElevation);
+        float solarElevation = clamp(g_elevation, 0.0f, float(F_PI_2));
+        float sunTheta = float(F_PI_2 - solarElevation);
         float sunPhi = 0.0f;
 
-        ArHosekSkyModelState* skyState[3] = {
+        float3 integral = 0.0f;
+
+        ArHosekSkyModelState* skyState[9] = {
                 arhosek_xyz_skymodelstate_alloc_init(g_turbidity, g_groundAlbedo.r, solarElevation),
                 arhosek_xyz_skymodelstate_alloc_init(g_turbidity, g_groundAlbedo.g, solarElevation),
                 arhosek_xyz_skymodelstate_alloc_init(g_turbidity, g_groundAlbedo.b, solarElevation)
@@ -114,23 +116,26 @@ static void generateSky(LinearImage image) {
 
     // generate the sky
     auto job = jobs::parallel_for<char>(js, nullptr, nullptr, uint32_t(image.getHeight()),
-        [&image, &jobData](char* d, size_t c) {
+        [&image, &jobData](const char* d, size_t c) {
             const size_t w = image.getWidth();
             const size_t h = image.getHeight();
 
             float maxSample = 0.00001f;
+            float3 integral{0.0f};
 
             size_t y0 = size_t(d);
             for (size_t y = y0; y < y0 + c; y++) {
-                float3* UTILS_RESTRICT data = image.get<float3>(0, y);
+                float3* UTILS_RESTRICT data = image.get<float3>(0, (uint32_t) y);
 
                 float v = (y + 0.5f) / h;
-                float theta = float(M_PI * v);
-                if (theta > M_PI_2) return;
+                float theta = float(F_PI * v);
+                if (theta > F_PI_2) return;
+
+                float integralDelta = sin(theta) / (w * h / 2.0f);
 
                 for (size_t x = 0; x < w; x++, data++) {
                     float u = (x + 0.5f) / w;
-                    float phi = float(-2.0 * M_PI * u + M_PI + g_azimuth);
+                    float phi = float(-2.0 * F_PI * u + F_PI + g_azimuth);
 
                     float gamma = angleBetween(theta, phi, jobData.sunTheta, jobData.sunPhi);
 
@@ -141,22 +146,24 @@ static void generateSky(LinearImage image) {
                     };
 
                     if (g_normalize) {
-                        sample *= float(4.0 * M_PI / 683.0);
+                        sample *= float(4.0 * F_PI / 683.0);
                     }
 
                     maxSample = std::max(maxSample, sample.y);
                     *data = XYZ_to_sRGB(sample);
+
+                    integral += *data * integralDelta;
                 }
             }
 
             std::lock_guard<std::mutex> guard(jobData.maximasMutex);
             jobData.maximas.push_back(maxSample);
+            jobData.integral += integral;
         },
         jobs::CountSplitter<1, 8>()
     );
 
     js.runAndWait(job);
-    js.reset();
 
     // cleanup sky data
     arhosekskymodelstate_free(jobData.skyState[0]);
@@ -171,6 +178,7 @@ static void generateSky(LinearImage image) {
         case ImageEncoder::Format::PNG_LINEAR: break;
         case ImageEncoder::Format::HDR: break;
         case ImageEncoder::Format::RGBM: break;
+        case ImageEncoder::Format::RGB_10_11_11_REV: break;
         case ImageEncoder::Format::PSD:
             if (g_compression != "32") {
                 hdrScale = 1.0f / maxValue;
@@ -188,20 +196,26 @@ static void generateSky(LinearImage image) {
             }
             break;
     }
-    if (g_normalize) maxValue /= float(4.0 * M_PI / 683.0);
+    if (g_normalize) maxValue /= float(4.0 * F_PI / 683.0);
 
     const size_t w = image.getWidth();
     const size_t h = image.getHeight();
 
     for (size_t y = 0; y < h; y++) {
-        float3* UTILS_RESTRICT data = image.get<float3>(0, y);
+        float3* UTILS_RESTRICT data = image.get<float3>(0, (uint32_t) y);
         for (size_t x = 0; x < w; x++, data++) {
+            if (y >= h / 2) {
+                *data = g_groundAlbedo * jobData.integral;
+            }
+
             *data *= hdrScale;
+
             if (g_tonemap) {
                 *data = tonemapACES(*data);
             }
+
             if (g_gammaCorrect) {
-                *data = pow(*data, 1.0f / 2.2f);
+                *data = image::sRGBToLinear(*data);
             }
         }
     }
@@ -209,7 +223,7 @@ static void generateSky(LinearImage image) {
     printf("Information\n");
     printf("    Max radiance:    %.2f W/(m^2.sr.nm)\n", maxValue);
     printf("    Max luminance:   %.2f nt\n", maxValue * 683.0f);
-    printf("    Max illuminance: %.2f lx\n", maxValue * 683.0f * 2.0 * M_PI);
+    printf("    Max illuminance: %.2f lx\n", maxValue * 683.0f * 2.0 * F_PI);
     printf("\n");
 
     printf("Rendering parameters\n");
@@ -229,7 +243,7 @@ static void printUsage(const char* name) {
             "       print this message\n\n"
             "   --license\n"
             "       Print copyright and license information\n\n"
-            "   --format=[exr|hdr|rgbm|psd|png|dds], -f [exr|hdr|rgbm|psd|png|dds]\n"
+            "   --format=[exr|hdr|rgbm|rgb32f|psd|png|dds], -f [exr|hdr|rgbm|rgb32f|psd|png|dds]\n"
             "       specify output file format, inferred from file name if omitted\n\n"
             "   --compression=COMPRESSION, -c COMPRESSION\n"
             "       format specific compression:\n"
@@ -249,8 +263,12 @@ static void printUsage(const char* name) {
             "       specify the sun azimuth in degrees, default is 0.0 (-Z)\n\n"
             "   --ground=ALBEDO, -g ALBEDO\n"
             "       specify the ground albedo, between 0.0 and 1.0, default is 0.25\n\n"
+            "   --normalize, -n\n"
+            "       normalizes output values between 0.0 and 1.0 (implied with PNG)\n\n"
             "   --tonemap, -m\n"
-            "       tone-mapped and gamma corrected output (implied with PNG)\n\n"
+            "       tone-mapped output (implied with PNG)\n\n"
+            "   --srgb, -s\n"
+            "       applies sRGB gamma correction (implies --normalize, implied with PNG)\n\n"
     );
 
     const std::string from("SKYGEN");
@@ -261,25 +279,32 @@ static void printUsage(const char* name) {
 }
 
 static void license() {
-    std::cout <<
-    #include "licenses/licenses.inc"
-    ;
+    static const char *license[] = {
+        #include "licenses/licenses.inc"
+        nullptr
+    };
+
+    const char **p = &license[0];
+    while (*p)
+        std::cout << *p++ << std::endl;
 }
 
 static int handleArguments(int argc, char* argv[]) {
-    static constexpr const char* OPTSTR = "hf:c:w:t:e:a:sg:m";
+    static constexpr const char* OPTSTR = "hf:c:w:t:e:a:sg:mns";
     static const struct option OPTIONS[] = {
-            { "help",                 no_argument, 0, 'h' },
-            { "license",              no_argument, 0, 'l' },
-            { "format",         required_argument, 0, 'f' },
-            { "compression",    required_argument, 0, 'c' },
-            { "width",          required_argument, 0, 'w' },
-            { "turbidity",      required_argument, 0, 't' },
-            { "elevation",      required_argument, 0, 'e' },
-            { "azimuth",        required_argument, 0, 'a' },
-            { "ground",         required_argument, 0, 'g' },
-            { "tonemap",              no_argument, 0, 'm' },
-            { 0, 0, 0, 0 }  // termination of the option list
+            { "help",                 no_argument, nullptr, 'h' },
+            { "license",              no_argument, nullptr, 'l' },
+            { "format",         required_argument, nullptr, 'f' },
+            { "compression",    required_argument, nullptr, 'c' },
+            { "width",          required_argument, nullptr, 'w' },
+            { "turbidity",      required_argument, nullptr, 't' },
+            { "elevation",      required_argument, nullptr, 'e' },
+            { "azimuth",        required_argument, nullptr, 'a' },
+            { "ground",         required_argument, nullptr, 'g' },
+            { "tonemap",              no_argument, nullptr, 'm' },
+            { "normalize",            no_argument, nullptr, 'n' },
+            { "srgb",                 no_argument, nullptr, 's' },
+            { nullptr, 0, nullptr, 0 }  // termination of the option list
     };
 
     int opt;
@@ -310,6 +335,10 @@ static int handleArguments(int argc, char* argv[]) {
                     g_format = ImageEncoder::Format::RGBM;
                     g_formatSpecified = true;
                 }
+                if (arg == "rgb32f") {
+                    g_format = ImageEncoder::Format::RGB_10_11_11_REV;
+                    g_formatSpecified = true;
+                }
                 if (arg == "exr") {
                     g_format = ImageEncoder::Format::EXR;
                     g_formatSpecified = true;
@@ -327,26 +356,32 @@ static int handleArguments(int argc, char* argv[]) {
                 g_compression = arg;
                 break;
             case 'w': {
-                int width = atoi(arg.c_str());
+                long width = strtol(arg.c_str(), nullptr, 10);
                 if (width > 2) {
                     g_outputWidth = (uint32_t) width;
                 }
                 break;
             }
             case 't':
-                g_turbidity = clamp((float) atof(arg.c_str()), 1.0f, 11.0f);
+                g_turbidity = clamp(strtof(arg.c_str(), nullptr), 1.0f, 11.0f);
                 break;
             case 'e':
-                g_elevation = (float) (atof(arg.c_str()) * M_PI / 180.0);
+                g_elevation = (float) (strtof(arg.c_str(), nullptr) * F_PI / 180.0);
                 break;
             case 'a':
-                g_azimuth = (float) (atof(arg.c_str()) * M_PI / 180.0);
+                g_azimuth = (float) (strtof(arg.c_str(), nullptr) * F_PI / 180.0);
                 break;
             case 'g':
-                g_groundAlbedo = clamp((float) atof(arg.c_str()), 0.0f, 1.0f);
+                g_groundAlbedo = clamp(strtof(arg.c_str(), nullptr), 0.0f, 1.0f);
                 break;
             case 'm':
                 g_tonemap = true;
+                break;
+            case 'n':
+                g_normalize = true;
+                break;
+            case 's':
+                g_gammaCorrect = true;
                 break;
         }
     }
@@ -381,8 +416,8 @@ int main(int argc, char* argv[]) {
         g_tonemap = true;
     }
 
-    if (g_tonemap && g_format != ImageEncoder::Format::PNG) {
-        g_gammaCorrect = true;
+    if (g_gammaCorrect) {
+        g_normalize = true;
     }
 
     // the aspect ratio is always 2:1 for equirectangular environment maps

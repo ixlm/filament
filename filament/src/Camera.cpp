@@ -22,10 +22,11 @@
 #include "details/Engine.h"
 
 #include <utils/compiler.h>
+#include <utils/Panic.h>
 
 #include <math/scalar.h>
 
-using namespace math;
+using namespace filament::math;
 using namespace utils;
 
 namespace filament {
@@ -46,7 +47,7 @@ FCamera::FCamera(FEngine& engine, Entity e)
 void UTILS_NOINLINE FCamera::setProjection(double fov, double aspect, double near, double far,
         Camera::Fov direction) noexcept {
     double w, h;
-    double s = std::tan(fov * (M_PI / 360.0)) * near;
+    double s = std::tan(fov * (F_PI / 360.0)) * near;
     if (direction == Fov::VERTICAL) {
         w = s * aspect;
         h = s;
@@ -68,7 +69,7 @@ void FCamera::setLensProjection(double focalLength, double near, double far) noe
  * All methods for setting the projection funnel through here
  */
 
-void UTILS_NOINLINE FCamera::setCustomProjection(math::mat4 const& p, double near, double far) noexcept {
+void UTILS_NOINLINE FCamera::setCustomProjection(mat4 const& p, double near, double far) noexcept {
     mProjectionForCulling = p;
     mProjection = p;
     mNear = (float)near;
@@ -80,25 +81,19 @@ void UTILS_NOINLINE FCamera::setProjection(Camera::Projection projection,
         double bottom, double top,
         double near, double far) noexcept {
 
-    // we silently make sure our preconditions are verified
-    // this is to avoid potential inconsistent state in the renderer later.
-
-    if (UTILS_UNLIKELY(left == right)) {
-        left -= 1;
-        right += 1;
-    }
-
-    if (UTILS_UNLIKELY(bottom == top)) {
-        bottom -= 1;
-        top += 1;
-    }
-
-    if (UTILS_UNLIKELY(projection == Projection::PERSPECTIVE && near < 1.0 / 1024.0)) {
-        near = 1.0 / 1024.0; // about 1mm
-    }
-
-    if (UTILS_UNLIKELY(near == far)) {
-        far += 1;
+    // we make sure our preconditions are verified, using default values,
+    // to avoid inconsistent states in the renderer later.
+    if (UTILS_UNLIKELY(left == right ||
+                       bottom == top ||
+                       (projection == Projection::PERSPECTIVE && (near <= 0 || far <= near)) ||
+                       (projection == Projection::ORTHO && (near == far)))) {
+        PANIC_LOG("Camera preconditions not met. Using default projection.");
+        left = -0.1;
+        right = 0.1;
+        bottom = -0.1;
+        top = 0.1;
+        near = 0.1;
+        far = 100.0;
     }
 
     mat4 p;
@@ -231,11 +226,11 @@ math::details::TMat44<T> inverseProjection(const math::details::TMat44<T>& p) no
 
 
 UTILS_NOINLINE
-math::mat4f FCamera::getViewMatrix(math::mat4f const& model) noexcept {
+mat4f FCamera::getViewMatrix(mat4f const& model) noexcept {
     return FCamera::rigidTransformInverse(model);
 }
 
-Frustum FCamera::getFrustum(math::mat4 const& projection, math::mat4f const& viewMatrix) noexcept {
+Frustum FCamera::getFrustum(mat4 const& projection, mat4f const& viewMatrix) noexcept {
     return Frustum(mat4f{ projection * viewMatrix });
 }
 
@@ -269,15 +264,15 @@ void Camera::setLensProjection(double focalLength, double near, double far) noex
     upcast(this)->setLensProjection(focalLength, near, far);
 }
 
-void Camera::setCustomProjection(math::mat4 const& projection, double near, double far) noexcept {
+void Camera::setCustomProjection(mat4 const& projection, double near, double far) noexcept {
     upcast(this)->setCustomProjection(projection, near, far);
 }
 
-const math::mat4& Camera::getProjectionMatrix() const noexcept {
+const mat4& Camera::getProjectionMatrix() const noexcept {
     return upcast(this)->getProjectionMatrix();
 }
 
-const math::mat4& Camera::getCullingProjectionMatrix() const noexcept {
+const mat4& Camera::getCullingProjectionMatrix() const noexcept {
     return upcast(this)->getCullingProjectionMatrix();
 }
 
@@ -289,11 +284,11 @@ float Camera::getCullingFar() const noexcept {
     return upcast(this)->getCullingFar();
 }
 
-void Camera::setModelMatrix(const math::mat4f& modelMatrix) noexcept {
+void Camera::setModelMatrix(const mat4f& modelMatrix) noexcept {
     upcast(this)->setModelMatrix(modelMatrix);
 }
 
-void Camera::lookAt(const math::float3& eye, const math::float3& center, float3 const& up) noexcept {
+void Camera::lookAt(const float3& eye, const float3& center, float3 const& up) noexcept {
     upcast(this)->lookAt(eye, center, up);
 }
 

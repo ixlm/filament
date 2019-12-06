@@ -18,8 +18,9 @@ package com.google.android.filament.tungsten.ui;
 
 import com.google.android.filament.tungsten.MaterialManager;
 import com.google.android.filament.tungsten.compiler.NodeRegistry;
-import com.google.android.filament.tungsten.model.Graph;
 import com.google.android.filament.tungsten.properties.PropertiesPanel;
+import com.google.android.filament.tungsten.ui.preview.PreviewMeshPanel;
+
 import java.awt.BorderLayout;
 import java.awt.Dimension;
 import javax.swing.JPanel;
@@ -42,7 +43,6 @@ public class TungstenPanel extends JPanel {
         JTextArea materialSource = new JTextArea();
         materialSource.setEditable(false);
 
-        Graph model = new Graph();
         MaterialGraphComponent materialGraph = new MaterialGraphComponent();
 
         PropertiesPanel propertiesPanel = new PropertiesPanel();
@@ -56,7 +56,7 @@ public class TungstenPanel extends JPanel {
         editor.addTab("Graph", materialGraph);
         editor.addTab("Source", materialSource);
 
-        GraphPresenter presenter = new GraphPresenter(model, materialGraph, mPreviewMeshPanel,
+        GraphPresenter presenter = new GraphPresenter(materialGraph, mPreviewMeshPanel,
                 materialSource, propertiesPanel, materialManager, file);
         materialGraph.setPresenter(presenter);
         propertiesPanel.setPresenter(presenter);

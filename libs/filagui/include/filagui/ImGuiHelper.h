@@ -48,6 +48,7 @@ public:
     ~ImGuiHelper();
 
     // Informs ImGui of the current display size, as well as the pixel ratio for high DPI displays.
+    // The display size is given in terms of virtual pixels, not physical pixels.
     void setDisplaySize(int width, int height, float scaleX = 0.0f, float scaleY = 0.0f);
 
     // This does not actually "render" in the sense of issuing OpenGL commands,
@@ -55,6 +56,12 @@ public:
     // rendering the View. This should be called on every frame, regardless of
     // whether the Renderer wants to skip or not.
     void render(float timeStepInSeconds, Callback imguiCommands);
+
+    // Helper method called after resolving fontPath; public so fonts can be added by caller.
+    void createAtlasTexture(filament::Engine* engine);
+
+    // Return the ImGui view, useful for drawing 2D overlays.
+    filament::View* getView() const { return mView; }
 
   private:
       void renderDrawData(ImDrawData* imguiData);
@@ -66,7 +73,7 @@ public:
       void syncThreads();
       filament::Engine* mEngine;
       filament::View* mView;
-      filament::Material const* mMaterial = nullptr;
+      filament::Material* mMaterial = nullptr;
       std::vector<filament::VertexBuffer*> mVertexBuffers;
       std::vector<filament::IndexBuffer*> mIndexBuffers;
       std::vector<filament::MaterialInstance*> mMaterialInstances;

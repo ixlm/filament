@@ -44,9 +44,9 @@ namespace gl {
 
 // This mutex protect g_library_refcount below.
 static std::mutex g_library_mutex;
-static uint32_t g_library_refcount = 0;
 
 #ifdef __APPLE__
+static uint32_t g_library_refcount = 0;
 
 // Function pointer types for CGL functions
 typedef CGLError (*CGL_CHOOSE_PIXEL_FORMAT_PROC)(const CGLPixelFormatAttribute*, CGLPixelFormatObj*, GLint*);
@@ -191,7 +191,7 @@ OpenGLContext createOpenGLContext() {
     };
 
     HWND hwnd = CreateWindowA("STATIC", "dummy", 0, 0, 0, 1, 1, NULL, NULL, NULL, NULL);
-    HDC whdc = mWhdc = GetDC(hwnd);
+    HDC whdc = GetDC(hwnd);
 
     int pixelFormat = ChoosePixelFormat(whdc, &pfd);
     SetPixelFormat(whdc, pixelFormat, &pfd);
@@ -202,11 +202,11 @@ OpenGLContext createOpenGLContext() {
 
     PFNWGLCREATECONTEXTATTRIBSARBPROC wglCreateContextAttribs =
             (PFNWGLCREATECONTEXTATTRIBSARBPROC) wglGetProcAddress("wglCreateContextAttribsARB");
-    HGLRC context = wglCreateContextAttribs(hdc, nullptr, attribs);
+    HGLRC context = wglCreateContextAttribs(whdc, nullptr, attribs);
 
     wglMakeCurrent(NULL, NULL);
     wglDeleteContext(tempContext);
-    wglMakeCurrent(hdc, context);
+    wglMakeCurrent(whdc, context);
 
     return new wglLocalContext(hwnd, whdc, context);
 }
@@ -269,6 +269,8 @@ struct GLXLocalContext {
     GLXContext context;
     GLXPbuffer buffer;
 };
+
+static uint32_t g_library_refcount = 0;
 
 bool loadLibraries() {
     std::lock_guard<std::mutex> lock(g_library_mutex);

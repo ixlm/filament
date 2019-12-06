@@ -19,9 +19,9 @@
 
 #include "upcast.h"
 
-#include "driver/DriverBase.h"
-
 #include <filament/Stream.h>
+
+#include <backend/Handle.h>
 
 #include <utils/compiler.h>
 
@@ -35,24 +35,27 @@ public:
     FStream(FEngine& engine, const Builder& builder) noexcept;
     void terminate(FEngine& engine) noexcept;
 
-    Handle<HwStream> getHandle() const noexcept { return mStreamHandle; }
+    backend::Handle<backend::HwStream> getHandle() const noexcept { return mStreamHandle; }
+
+    void setAcquiredImage(void* image, Callback callback, void* userdata) noexcept;
 
     void setDimensions(uint32_t width, uint32_t height) noexcept;
 
     void readPixels(uint32_t xoffset, uint32_t yoffset, uint32_t width, uint32_t height,
-            driver::PixelBufferDescriptor&& buffer) noexcept;
+            backend::PixelBufferDescriptor&& buffer) noexcept;
 
-    bool isNativeStream() const noexcept { return mNativeStream != nullptr; }
-
-    bool isExternalTextureId() const noexcept { return !isNativeStream(); }
+    StreamType getStreamType() const noexcept { return mStreamType; }
 
     uint32_t getWidth() const noexcept { return mWidth; }
 
     uint32_t getHeight() const noexcept { return mHeight; }
 
+    int64_t getTimestamp() const noexcept;
+
 private:
     FEngine& mEngine;
-    Handle<HwStream> mStreamHandle;
+    const StreamType mStreamType;
+    backend::Handle<backend::HwStream> mStreamHandle;
     void* mNativeStream = nullptr;
     intptr_t mExternalTextureId;
     uint32_t mWidth;

@@ -18,7 +18,7 @@
 #define TNT_CONFIG_H
 
 #include <filament/MaterialEnums.h>
-#include <filament/driver/DriverEnums.h>
+#include <backend/DriverEnums.h>
 
 #include <filamat/MaterialBuilder.h>
 
@@ -31,12 +31,6 @@ namespace matc {
 
 class Config {
 public:
-    enum class Mode {
-        MATERIAL,
-        DEPTH,
-        POSTPROCESS,
-    };
-
     enum class OutputFormat {
         BLOB,
         C_HEADER,
@@ -44,24 +38,18 @@ public:
 
     using Platform = filamat::MaterialBuilder::Platform;
     using TargetApi = filamat::MaterialBuilder::TargetApi;
-
-    enum class Optimization {
-        NONE,
-        PREPROCESSOR,
-        SIZE,
-        PERFORMANCE
-    };
+    using Optimization = filamat::MaterialBuilder::Optimization;
 
     enum class Metadata {
         NONE,
         PARAMETERS
     };
 
-    virtual ~Config() {}
+    virtual ~Config() = default;
 
     class Output {
     public:
-        virtual ~Output() {}
+        virtual ~Output() = default;
         virtual bool open() noexcept = 0;
         virtual bool write(const uint8_t* data, size_t size) noexcept = 0;
         virtual std::ostream& getOutputStream() noexcept = 0;
@@ -71,7 +59,7 @@ public:
 
     class Input {
     public:
-        virtual ~Input() {}
+        virtual ~Input() = default;
         virtual ssize_t open() noexcept = 0;
         virtual std::unique_ptr<const char[]> read() noexcept = 0;
         virtual bool close() noexcept = 0;
@@ -83,10 +71,6 @@ public:
 
     bool isDebug() const noexcept {
         return mDebug;
-    }
-
-    Mode getMode() const noexcept {
-        return mMode;
     }
 
     Platform getPlatform() const noexcept {
@@ -117,17 +101,6 @@ public:
         return mTargetApi;
     }
 
-    /**
-     * Returns the target API suitable for the current optimization level. It might be
-     * different than the target API returned by getTargetApi().
-     */
-    TargetApi getCodeGenTargetApi() const noexcept {
-        // When optimizing OpenGL we use SPIRV as an intermediate representation so we must force
-        // the target API to be Vulkan for the generated shaders to compile
-        return mOptimizationLevel > Optimization::PREPROCESSOR && mTargetApi != TargetApi::VULKAN ?
-                TargetApi::VULKAN : mTargetApi;
-    }
-
     bool printShaders() const noexcept {
         return mPrintShaders;
     }
@@ -140,12 +113,11 @@ protected:
     bool mDebug = false;
     bool mIsValid = true;
     bool mPrintShaders = false;
-    Optimization mOptimizationLevel = Optimization::NONE;
+    Optimization mOptimizationLevel = Optimization::PERFORMANCE;
     Metadata mReflectionTarget = Metadata::NONE;
-    Mode mMode = Mode::MATERIAL;
     Platform mPlatform = Platform::ALL;
     OutputFormat mOutputFormat = OutputFormat::BLOB;
-    TargetApi mTargetApi = TargetApi::OPENGL;
+    TargetApi mTargetApi = (TargetApi) 0;
     uint8_t mVariantFilter = 0;
 };
 

@@ -16,6 +16,7 @@
 
 package com.google.android.filament.tungsten.model
 
+import com.google.android.filament.tungsten.compiler.Expression
 import com.google.android.filament.tungsten.compiler.GraphCompiler
 import kotlin.reflect.KProperty
 
@@ -27,6 +28,7 @@ data class Connection(
 abstract class Slot
 
 typealias NodeId = Int
+typealias CompileFunction = (Node, GraphCompiler) -> Node
 
 /**
  * An immutable Node in the graph.
@@ -41,13 +43,13 @@ data class Node(
 
     // A node's compile function generates code by calling methods on a GraphCompiler. The function
     // can return a new node if compilation has changed properties of the node itself.
-    val compileFunction: (Node, GraphCompiler) -> Node = { n, _ -> n },
+    val compileFunction: CompileFunction = { n, _ -> n },
 
     // Input and output slots of a node are represented by a String name.
     val outputSlots: List<String> = emptyList(),
     val inputSlots: List<String> = emptyList(),
 
-    val properties: List<Property> = emptyList()
+    val properties: List<Property<*>> = emptyList()
 ) {
 
     data class InputSlot(val nodeId: NodeId, val name: String) : Slot()
@@ -63,13 +65,16 @@ data class Node(
         }
     }
 
-    fun getInputSlot(name: String): InputSlot {
-        return InputSlot(id, name)
-    }
+    data class PropertyHandle(val nodeId: NodeId, val name: String)
 
-    fun getOutputSlot(name: String): OutputSlot {
-        return OutputSlot(id, name)
-    }
+    fun getPropertyHandle(name: String) = PropertyHandle(id, name)
+
+    fun getInputSlot(name: String) = InputSlot(id, name)
+
+    fun getOutputSlot(name: String) = OutputSlot(id, name)
+
+    fun nodeBySettingInputSlots(newInputs: List<String>) =
+            if (inputSlots === newInputs) this else copy(inputSlots = newInputs)
 }
 
 class ConnectionMapper {
@@ -99,7 +104,10 @@ data class Graph(
     val nodes: List<Node> = emptyList(),
     val rootNodeId: NodeId? = null,
     val selection: List<NodeId> = emptyList(),
-    val connections: List<Connection> = emptyList()
+    val connections: List<Connection> = emptyList(),
+
+    // Maps from slots to their corresponding Expressions.
+    val expressionMap: Map<Slot, Expression> = emptyMap()
 ) {
 
     /**
@@ -117,75 +125,60 @@ data class Graph(
     /**
      * Returns the next available NodeId for this graph.
      */
-    fun getNewNodeId(): NodeId {
-        return nodes.size
-    }
+    fun getNewNodeId() = nodes.size
 
-    fun getRootNode(): Node? {
-        return nodeMap[rootNodeId]
-    }
+    fun getRootNode() = nodeMap[rootNodeId]
 
-    fun getNodeWithId(id: NodeId): Node? {
-        return nodeMap[id]
-    }
+    fun getNodeWithId(id: NodeId) = nodeMap[id]
 
-    fun getOutputSlotConnectedToInput(slot: Node.InputSlot): Node.OutputSlot? {
-        return connectionMap[slot]
-    }
+    fun getNodeProperty(property: Node.PropertyHandle) =
+            nodeMap[property.nodeId]?.properties?.find { p -> p.name == property.name }
 
-    fun isNodeSelected(node: Node): Boolean {
-        return selection.contains(node.id)
-    }
+    fun getOutputSlotConnectedToInput(slot: Node.InputSlot) = connectionMap[slot]
 
-    fun getNodeForOutputSlot(slot: Node.OutputSlot): Node? {
-        return nodeMap[slot.nodeId]
-    }
+    fun isNodeSelected(node: Node) = selection.contains(node.id)
 
-    fun getSelectedNodes(): List<Node> {
-        return nodes.filter { n -> selection.contains(n.id) }
-    }
+    fun getNodeForOutputSlot(slot: Node.OutputSlot) = nodeMap[slot.nodeId]
+
+    fun getSelectedNodes() = nodes.filter { n -> selection.contains(n.id) }
 
     /**
      * The following convenience methods return a new copy of the graph with certain attributes
      * modified.
      */
 
-    fun graphByAddingNode(node: Node): Graph {
-        return this.copy(nodes = nodes + node)
-    }
+    fun graphByAddingNode(node: Node) = this.copy(nodes = nodes + node)
 
-    fun graphByChangingSelection(selection: List<NodeId>): Graph {
-        return this.copy(selection = selection)
-    }
+    fun graphByChangingSelection(selection: List<NodeId>) = this.copy(selection = selection)
 
-    fun graphByAddingNodeAtLocation(node: Node, x: Float, y: Float): Graph {
-        return this.copy(nodes = nodes + node.copy(x = x, y = y))
-    }
+    fun graphByAddingNodeAtLocation(node: Node, x: Float, y: Float) =
+            this.copy(nodes = nodes + node.copy(x = x, y = y))
 
-    fun graphByReplacingNode(oldNode: Node, newNode: Node): Graph {
-        if (nodes.contains(oldNode)) {
-            return this.copy(nodes = nodes - oldNode + newNode)
-        }
-        return this
-    }
+    fun graphByReplacingNode(oldNode: Node, newNode: Node) =
+            graphByReplacingNodes(mapOf(oldNode to newNode))
 
-    fun graphByChangingProperty(id: NodeId, propertyName: String, value: PropertyValue): Graph {
-        val node = nodeMap[id] ?: return this
+    fun graphByChangingProperty(property: Node.PropertyHandle, value: Property<*>): Graph {
+        val node = nodeMap[property.nodeId] ?: return this
         val newProperties = node.properties.map {
-            p -> if (p.name == propertyName) Property(propertyName, value) else p
+            p -> if (p.name == property.name) value else p
         }
         return graphByReplacingNode(node, node.copy(properties = newProperties))
     }
 
-    fun graphByMovingNode(node: Node, x: Float, y: Float): Graph {
-        return graphByReplacingNode(node, node.copy(x = x, y = y))
+    fun graphByMovingNode(node: Node, x: Float, y: Float) =
+            graphByReplacingNode(node, node.copy(x = x, y = y))
+
+    fun graphByReplacingNodes(nodeMap: Map<Node, Node>): Graph {
+        val newNodes = nodes.map { n -> nodeMap[n] ?: n }
+        return this.copy(nodes = newNodes)
     }
 
-    fun graphByFormingConnection(connection: Connection): Graph {
-        return this.copy(connections = connections + connection)
-    }
+    fun graphByFormingConnection(connection: Connection) =
+            this.copy(connections = connections + connection)
 
-    fun graphByRemovingConnection(connection: Connection): Graph {
-        return this.copy(connections = connections - connection)
-    }
+    fun graphByRemovingConnection(connection: Connection) =
+            this.copy(connections = connections - connection)
+
+    fun graphBySettingExpressionMap(expressionMap: Map<Slot, Expression>) =
+            this.copy(expressionMap = expressionMap)
 }

@@ -19,13 +19,32 @@
 #include <jni.h>
 
 #include <filament/Stream.h>
-#include <filament/driver/PixelBufferDescriptor.h>
+#include <backend/PixelBufferDescriptor.h>
 
-#include "NioUtils.h"
-#include "CallbackUtils.h"
+#include "common/NioUtils.h"
+#include "common/CallbackUtils.h"
+
+#ifdef ANDROID
+
+#if __has_include(<android/hardware_buffer_jni.h>)
+#include <android/hardware_buffer_jni.h>
+#else
+struct AHardwareBuffer;
+typedef struct AHardwareBuffer AHardwareBuffer;
+#endif
+
+#include <android/log.h>
+
+#include <dlfcn.h>
+
+using PFN_FROMHARDWAREBUFFER = AHardwareBuffer* (*)(JNIEnv*, jobject);
+static PFN_FROMHARDWAREBUFFER AHardwareBuffer_fromHardwareBuffer_fn = nullptr;
+static bool sHardwareBufferSupported = true;
+
+#endif
 
 using namespace filament;
-using namespace driver;
+using namespace backend;
 
 class StreamBuilder {
 public:
@@ -108,10 +127,10 @@ Java_com_google_android_filament_Stream_nBuilderBuild(JNIEnv*, jclass,
     return (jlong) builder->builder()->build(*engine);
 }
 
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_google_android_filament_Stream_nIsNative(JNIEnv*, jclass, jlong nativeStream) {
+extern "C" JNIEXPORT jint JNICALL
+Java_com_google_android_filament_Stream_nGetStreamType(JNIEnv*, jclass, jlong nativeStream) {
     Stream* stream = (Stream*) nativeStream;
-    return (jboolean) stream->isNativeStream();
+    return (jint) stream->getStreamType();
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -145,12 +164,59 @@ Java_com_google_android_filament_Stream_nReadPixels(JNIEnv *env, jclass,
     void *buffer = nioBuffer.getData();
     auto *callback = JniBufferCallback::make(engine, env, handler, runnable, std::move(nioBuffer));
 
-    PixelBufferDescriptor desc(buffer, sizeInBytes, (driver::PixelDataFormat) format,
-            (driver::PixelDataType) type, (uint8_t) alignment, (uint32_t) left, (uint32_t) top,
+    PixelBufferDescriptor desc(buffer, sizeInBytes, (backend::PixelDataFormat) format,
+            (backend::PixelDataType) type, (uint8_t) alignment, (uint32_t) left, (uint32_t) top,
             (uint32_t) stride, &JniBufferCallback::invoke, callback);
 
     stream->readPixels(uint32_t(xoffset), uint32_t(yoffset), uint32_t(width), uint32_t(height),
             std::move(desc));
 
     return 0;
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_google_android_filament_Stream_nGetTimestamp(JNIEnv*, jclass, jlong nativeStream) {
+    Stream *stream = (Stream *) nativeStream;
+    return stream->getTimestamp();
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_google_android_filament_Stream_nSetAcquiredImage(JNIEnv* env, jclass, jlong nativeStream,
+        jlong nativeEngine, jobject hwbuffer, jobject handler, jobject runnable) {
+    Engine* engine = (Engine*) nativeEngine;
+    Stream* stream = (Stream*) nativeStream;
+
+#ifdef ANDROID
+
+    // This function is not available before NDK 15 or before Android 8.
+    if (UTILS_UNLIKELY(!AHardwareBuffer_fromHardwareBuffer_fn)) {
+        if (!sHardwareBufferSupported) {
+            return;
+        }
+        AHardwareBuffer_fromHardwareBuffer_fn = (PFN_FROMHARDWAREBUFFER) dlsym(RTLD_DEFAULT, "AHardwareBuffer_fromHardwareBuffer");
+         if (!AHardwareBuffer_fromHardwareBuffer_fn) {
+            __android_log_print(ANDROID_LOG_WARN, "Filament", "AHardwareBuffer_fromHardwareBuffer is not available.");
+            sHardwareBufferSupported = false;
+        }
+        return;
+    }
+
+    AHardwareBuffer* nativeBuffer = AHardwareBuffer_fromHardwareBuffer_fn(env, hwbuffer);
+    if (!nativeBuffer) {
+        __android_log_print(ANDROID_LOG_INFO, "Filament", "Unable to obtain native HardwareBuffer.");
+        return;
+    }
+
+    auto* callback = JniImageCallback::make(engine, env, handler, runnable, (long) nativeBuffer);
+
+#else
+
+    // TODO: for non-Android platforms, it is unclear how to go from "jobject" to "void*"
+    // For now this code is reserved for future use.
+    auto* callback = JniImageCallback::make(engine, env, handler, runnable, 0);
+    void* nativeBuffer = nullptr;
+
+#endif
+
+    stream->setAcquiredImage((void*) nativeBuffer, &JniImageCallback::invoke, callback);
 }

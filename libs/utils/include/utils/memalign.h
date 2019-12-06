@@ -17,7 +17,6 @@
 #ifndef TNT_UTILS_MEMALIGN_H
 #define TNT_UTILS_MEMALIGN_H
 
-#include <cstddef>
 #include <type_traits>
 
 #include <assert.h>
@@ -101,15 +100,13 @@ public:
     }
 
     // stateless allocators are always equal
-    template<typename T, typename U>
-    friend bool
-    operator==(const STLAlignedAllocator<T>& rhs, const STLAlignedAllocator<U>& lhs) {
+    template<typename T>
+    bool operator==(const STLAlignedAllocator<T>& rhs) const noexcept {
         return true;
     }
 
-    template<typename T, typename U>
-    friend bool
-    operator!=(const STLAlignedAllocator<T>& rhs, const STLAlignedAllocator<U>& lhs) {
+    template<typename T>
+    bool operator!=(const STLAlignedAllocator<T>& rhs) const noexcept {
         return false;
     }
 };

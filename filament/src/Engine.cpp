@@ -16,6 +16,8 @@
 
 #include "details/Engine.h"
 
+#include "MaterialParser.h"
+
 #include "details/DFG.h"
 #include "details/VertexBuffer.h"
 #include "details/Fence.h"
@@ -31,93 +33,125 @@
 #include "details/SwapChain.h"
 #include "details/Texture.h"
 #include "details/View.h"
-#include "driver/Program.h"
 
-#include "PrecompiledMaterials.h"
+#include "fg/ResourceAllocator.h"
 
-#include <filament/Exposure.h>
 
 #include <private/filament/SibGenerator.h>
-#include <private/filament/UibGenerator.h>
 
-#include <filaflat/MaterialParser.h>
-#include <filaflat/ShaderBuilder.h>
+#include <filament/MaterialEnums.h>
 
 #include <utils/compiler.h>
-#include <utils/CString.h>
 #include <utils/Log.h>
 #include <utils/Panic.h>
 #include <utils/Systrace.h>
 
-#include <math/fast.h>
-#include <math/scalar.h>
+#include <memory>
 
-#include <functional>
+#include "generated/resources/materials.h"
 
-#include <stdio.h>
-
-
-using namespace math;
+using namespace filament::math;
 using namespace utils;
 
 namespace filament {
 
-using namespace driver;
+using namespace backend;
 using namespace filaflat;
 
 namespace details {
 
-// The global list of engines
-static std::unordered_map<Engine const*, std::unique_ptr<FEngine>> sEngines;
-static std::mutex sEnginesLock;
+// Global list of engines used for diagnostic purposes only.
+// This console output in the constructor helps catch situations where the Filament library is
+// loaded twice, or not at all. Note that we avoid using slog due to static initialization.
+class EngineList {
+public:
+    EngineList() {
+        io::LogStream cinfo(io::LogStream::Priority::INFO);
+        cinfo << "Filament library loaded." << io::endl;
+    }
+    void add(FEngine* instance) {
+        std::unique_ptr<FEngine> engine(instance);
+        std::lock_guard<std::mutex> guard(mLock);
+        Engine* handle = engine.get();
+        mEngines[handle] = std::move(engine);
+    }
+    std::unique_ptr<FEngine> remove(FEngine* instance) {
+        std::unique_ptr<FEngine> filamentEngine;
+        std::lock_guard<std::mutex> guard(mLock);
+        auto const& pos = mEngines.find(instance);
+        if (pos != mEngines.end()) {
+            std::swap(filamentEngine, pos->second);
+            mEngines.erase(pos);
+        }
+        return filamentEngine;
+    }
+    bool isValid(Engine const& engine, const char* function)  {
+        std::lock_guard<std::mutex> guard(mLock);
+        auto const& pos = mEngines.find(&engine);
+        return pos != mEngines.end();
+    }
+private:
+    std::unordered_map<Engine const*, std::unique_ptr<FEngine>> mEngines;
+    std::mutex mLock;
+};
 
-FEngine* FEngine::create(Backend backend, ExternalContext* externalContext, void* sharedGLContext) {
-    FEngine* instance = new FEngine(backend, externalContext, sharedGLContext);
+static EngineList sEngines;
 
-    slog.i << "FEngine (" << sizeof(void*) * 8 << " bits) created at " << instance << io::endl;
+FEngine* FEngine::create(Backend backend, Platform* platform, void* sharedGLContext) {
+    FEngine* instance = new FEngine(backend, platform, sharedGLContext);
+
+    slog.i << "FEngine (" << sizeof(void*) * 8 << " bits) created at " << instance << " "
+            << "(threading is " << (UTILS_HAS_THREADING ? "enabled)" : "disabled)") << io::endl;
 
     // initialize all fields that need an instance of FEngine
     // (this cannot be done safely in the ctor)
 
-    // start the driver thread
-    instance->mDriverThread = std::thread(&FEngine::loop, instance);
+    // Normally we launch a thread and create the context and Driver from there (see FEngine::loop).
+    // In the single-threaded case, we do so in the here and now.
+    if (!UTILS_HAS_THREADING) {
+        // we don't own the external context at that point, set it to null
+        instance->mPlatform = nullptr;
+        if (platform == nullptr) {
+            platform = DefaultPlatform::create(&instance->mBackend);
+            instance->mPlatform = platform;
+            instance->mOwnPlatform = true;
+        }
+        instance->mDriver = platform->createDriver(sharedGLContext);
+    } else {
+        // start the driver thread
+        instance->mDriverThread = std::thread(&FEngine::loop, instance);
 
-    // wait for the driver to be ready
-    instance->mDriverBarrier.await();
+        // wait for the driver to be ready
+        instance->mDriverBarrier.await();
 
-    if (UTILS_UNLIKELY(!instance->mDriver)) {
-        // something went horribly wrong during driver initialization
-        instance->mDriverThread.join();
-        return nullptr;
+        if (UTILS_UNLIKELY(!instance->mDriver)) {
+            // something went horribly wrong during driver initialization
+            instance->mDriverThread.join();
+            return nullptr;
+        }
     }
+
+    sEngines.add(instance);
 
     // now we can initialize the largest part of the engine
     instance->init();
 
+    if (!UTILS_HAS_THREADING) {
+        instance->execute();
+    }
+
     return instance;
 }
 
-UniformInterfaceBlock FEngine::PerViewUib::getUib() noexcept {
-    return UibGenerator::getPerViewUib();
-}
-
-UniformInterfaceBlock FEngine::PerRenderableUib::getUib() noexcept {
-    return UibGenerator::getPerRenderableUib();
-}
-
-UniformInterfaceBlock FEngine::PostProcessingUib::getUib() noexcept {
-    return UibGenerator::getPostProcessingUib();
-}
-
-SamplerInterfaceBlock FEngine::PerViewSib::getSib() noexcept {
-    return SibGenerator::getPerViewSib();
-}
-
-SamplerInterfaceBlock FEngine::PostProcessSib::getSib() noexcept {
-    return SibGenerator::getPostProcessSib();
+void FEngine::assertValid(Engine const& engine, const char* function) {
+    bool valid = sEngines.isValid(engine, function);
+    ASSERT_POSTCONDITION(valid,
+            "Using an invalid Engine instance (@ %p) from %s.", &engine, function);
 }
 
 // these must be static because only a pointer is copied to the render stream
+// Note that these coordinates are specified in OpenGL clip space. Other backends can transform
+// these in the vertex shader as needed.
 static const half4 sFullScreenTriangleVertices[3] = {
         { -1.0_h, -1.0_h, 1.0_h, 1.0_h },
         {  3.0_h, -1.0_h, 1.0_h, 1.0_h },
@@ -127,23 +161,19 @@ static const half4 sFullScreenTriangleVertices[3] = {
 // these must be static because only a pointer is copied to the render stream
 static const uint16_t sFullScreenTriangleIndices[3] = { 0, 1, 2 };
 
-FEngine::FEngine(Backend backend, ExternalContext* externalContext, void* sharedGLContext) :
+FEngine::FEngine(Backend backend, Platform* platform, void* sharedGLContext) :
         mBackend(backend),
-        mExternalContext(externalContext),
+        mPlatform(platform),
         mSharedGLContext(sharedGLContext),
+        mPostProcessManager(*this),
         mEntityManager(EntityManager::get()),
         mRenderableManager(*this),
         mTransformManager(),
         mLightManager(*this),
         mCameraManager(*this),
-        mPerViewUib(PerViewUib::getUib()),
-        mPerRenderableUib(PerRenderableUib::getUib()),
-        mPerViewSib(PerViewSib::getSib()),
-        mPostProcessUib(PostProcessingUib::getUib()),
-        mPostProcessSib(PostProcessSib::getSib()),
         mCommandBufferQueue(CONFIG_MIN_COMMAND_BUFFERS_SIZE, CONFIG_COMMAND_BUFFERS_SIZE),
         mPerRenderPassAllocator("per-renderpass allocator", CONFIG_PER_RENDER_PASS_ARENA_SIZE),
-        mEpoch(std::chrono::steady_clock::now()),
+        mEngineEpoch(std::chrono::steady_clock::now()),
         mDriverBarrier(1)
 {
     SYSTRACE_ENABLE();
@@ -163,13 +193,7 @@ void FEngine::init() {
     mCommandStream = CommandStream(*mDriver, mCommandBufferQueue.getCircularBuffer());
     DriverApi& driverApi = getDriverApi();
 
-    // Parse all post process shaders now, but create them lazily
-    mPostProcessParser = std::make_unique<filaflat::MaterialParser>(mBackend,
-            POST_PROCESS_PACKAGE, POST_PROCESS_PACKAGE_SIZE);
-
-    UTILS_UNUSED_IN_RELEASE bool ppMaterialOk =
-            mPostProcessParser->parse() && mPostProcessParser->isPostProcessMaterial();
-    assert(ppMaterialOk);
+    mResourceAllocator = new fg::ResourceAllocator(driverApi);
 
     mFullScreenTriangleVb = upcast(VertexBuffer::Builder()
             .vertexCount(3)
@@ -192,18 +216,18 @@ void FEngine::init() {
     driverApi.setRenderPrimitiveBuffer(mFullScreenTriangleRph,
             mFullScreenTriangleVb->getHwHandle(), mFullScreenTriangleIb->getHwHandle(),
             mFullScreenTriangleVb->getDeclaredAttributes().getValue());
-    driverApi.setRenderPrimitiveRange(mFullScreenTriangleRph, Driver::PrimitiveType::TRIANGLES,
+    driverApi.setRenderPrimitiveRange(mFullScreenTriangleRph, PrimitiveType::TRIANGLES,
             0, 0, 2, (uint32_t)mFullScreenTriangleIb->getIndexCount());
 
     mDefaultIblTexture = upcast(Texture::Builder()
             .width(1).height(1).levels(1)
-            .format(Texture::InternalFormat::RGBM)
+            .format(Texture::InternalFormat::RGBA8)
             .sampler(Texture::Sampler::SAMPLER_CUBEMAP)
             .build(*this));
     static uint32_t pixel = 0;
     Texture::PixelBufferDescriptor buffer(
-            &pixel, 4, // 4 bytes in 1 RGBM pixel
-            Texture::Format::RGBM, Texture::Type::UBYTE);
+            &pixel, 4, // 4 bytes in 1 RGBA pixel
+            Texture::Format::RGBA, Texture::Type::UBYTE);
     Texture::FaceOffsets offsets = {};
     mDefaultIblTexture->setImage(*this, 0, std::move(buffer), offsets);
 
@@ -215,20 +239,24 @@ void FEngine::init() {
             .intensity(1.0f)
             .build(*this));
 
-    mPostProcessManager.init(*this);
-    mRenderTargetPool.init(*this);
-    mLightManager.init(*this);
-    mDFG.reset(new DFG(*this));
-
     // Always initialize the default material, most materials' depth shaders fallback on it.
     mDefaultMaterial = upcast(
             FMaterial::DefaultMaterialBuilder()
-                    .package(DEFAULT_MATERIAL_PACKAGE, DEFAULT_MATERIAL_PACKAGE_SIZE)
+                    .package(MATERIALS_DEFAULTMATERIAL_DATA, MATERIALS_DEFAULTMATERIAL_SIZE)
                     .build(*const_cast<FEngine*>(this)));
+
+    mPostProcessManager.init();
+    mLightManager.init(*this);
+    mDFG = std::make_unique<DFG>(*this);
 }
 
 FEngine::~FEngine() noexcept {
     ASSERT_DESTRUCTOR(mTerminated, "Engine destroyed but not terminated!");
+    delete mResourceAllocator;
+    delete mDriver;
+    if (mOwnPlatform) {
+        DefaultPlatform::destroy((DefaultPlatform**)&mPlatform);
+    }
 }
 
 void FEngine::shutdown() {
@@ -247,7 +275,7 @@ void FEngine::shutdown() {
      */
 
     mPostProcessManager.terminate(driver);  // free-up post-process manager resources
-    mRenderTargetPool.terminate(driver);    // free-up all offscreen render targets
+    mResourceAllocator->terminate();
     mDFG->terminate();                      // free-up the DFG
     mRenderableManager.terminate();         // free-up all renderables
     mLightManager.terminate();              // free-up all lights
@@ -259,6 +287,8 @@ void FEngine::shutdown() {
 
     destroy(mDefaultIblTexture);
     destroy(mDefaultIbl);
+
+    destroy(mDefaultMaterial);
 
     /*
      * clean-up after the user -- we call terminate on each "leaked" object and clear each list.
@@ -273,36 +303,49 @@ void FEngine::shutdown() {
     cleanupResourceList(mSkyboxes);
 
     // this must be done after Skyboxes and before materials
-    for (FMaterial const* material : mSkyboxMaterials) {
-        destroy(material);
-    }
+    destroy(mSkyboxMaterial);
 
     cleanupResourceList(mIndexBuffers);
     cleanupResourceList(mVertexBuffers);
     cleanupResourceList(mTextures);
+    cleanupResourceList(mRenderTargets);
     cleanupResourceList(mMaterials);
     for (auto& item : mMaterialInstances) {
         cleanupResourceList(item.second);
     }
     cleanupResourceList(mFences);
 
-    for (size_t i = 0; i < POST_PROCESS_STAGES_COUNT; i++) {
-        driver.destroyProgram(mPostProcessPrograms[i]);
-    }
-
-    // There might be commands added by the terminate() calls
-    flushCommandBuffer(mCommandBufferQueue);
-
     /*
-     * terminate the rendering engine
+     * Shutdown the backend...
      */
 
+    // There might be commands added by the terminate() calls, so we need to flush all commands
+    // up to this point. After flushCommandBuffer() is called, all pending commands are guaranteed
+    // to be executed before the driver thread exits.
+    flushCommandBuffer(mCommandBufferQueue);
+
+    // now wait for all pending commands to be executed and the thread to exit
     mCommandBufferQueue.requestExit();
-    mDriverThread.join();
-    mTerminated = true;
+    if (!UTILS_HAS_THREADING) {
+        execute();
+        getDriverApi().terminate();
+    } else {
+        mDriverThread.join();
+
+    }
+
+    // Finally, call user callbacks that might have been scheduled.
+    // These callbacks CANNOT call driver APIs.
+    getDriver().purge();
+
+    /*
+     * Terminate the JobSystem...
+     */
 
     // detach this thread from the jobsystem
     mJobSystem.emancipate();
+
+    mTerminated = true;
 }
 
 void FEngine::prepare() {
@@ -310,14 +353,22 @@ void FEngine::prepare() {
     // prepare() is called once per Renderer frame. Ideally we would upload the content of
     // UBOs that are visible only. It's not such a big issue because the actual upload() is
     // skipped is the UBO hasn't changed. Still we could have a lot of these.
+    FEngine::DriverApi& driver = getDriverApi();
     for (auto& materialInstanceList : mMaterialInstances) {
         for (auto& item : materialInstanceList.second) {
-            item->commit(*this);
+            item->commit(driver);
         }
+    }
+
+    // Commit default material instances.
+    for (auto& material : mMaterials) {
+        material->getDefaultInstance()->commit(driver);
     }
 }
 
 void FEngine::gc() {
+    // Note: this runs in a Job
+
     JobSystem& js = mJobSystem;
     auto parent = js.createJob();
     auto em = std::ref(mEntityManager);
@@ -339,19 +390,78 @@ void FEngine::flush() {
     flushCommandBuffer(mCommandBufferQueue);
 }
 
+void FEngine::flushAndWait() {
+    // enqueue finish command -- this will stall in the driver until the GPU is done
+    getDriverApi().finish();
+
+    // then create a fence that will trigger when we're past the finish() above
+    FFence::waitAndDestroy(
+            FEngine::createFence(FFence::Type::SOFT), FFence::Mode::FLUSH);
+
+    // finally, execute callbacks that might have been scheduled
+    getDriver().purge();
+}
+
 // -----------------------------------------------------------------------------------------------
 // Render thread / command queue
 // -----------------------------------------------------------------------------------------------
 
 int FEngine::loop() {
-    if (mExternalContext == nullptr) {
-        mExternalContext = ExternalContext::create(&mBackend);
-#if !defined(NDEBUG)
-        slog.d << "FEngine resolved backend: "
-               << (mBackend == driver::Backend::VULKAN ? "Vulkan" : "OpenGL") << io::endl;
-#endif
+    // we don't own the external context at that point, set it to null
+    Platform* platform = mPlatform;
+    mPlatform = nullptr;
+
+    if (platform == nullptr) {
+        platform = DefaultPlatform::create(&mBackend);
+        mPlatform = platform;
+        mOwnPlatform = true;
+        slog.d << "FEngine resolved backend: ";
+        switch (mBackend) {
+            case backend::Backend::NOOP:
+                slog.d << "Noop";
+                break;
+
+            case backend::Backend::OPENGL:
+                slog.d << "OpenGL";
+                break;
+
+            case backend::Backend::VULKAN:
+                slog.d << "Vulkan";
+                break;
+
+            case backend::Backend::METAL:
+                slog.d << "Metal";
+                break;
+
+            default:
+                slog.d << "Unknown";
+                break;
+        }
+        slog.d << io::endl;
     }
-    mDriver = mExternalContext->createDriver(mSharedGLContext);
+
+#if FILAMENT_ENABLE_MATDBG
+    const char* portString = getenv("FILAMENT_MATDBG_PORT");
+    if (portString != nullptr) {
+        const int port = atoi(portString);
+        debug.server = new matdbg::DebugServer(mBackend, port);
+
+        // Sometimes the server can fail to spin up (e.g. if the above port is already in use).
+        // When this occurs, carry onward, developers can look at civetweb.txt for details.
+        if (!debug.server->isReady()) {
+            delete debug.server;
+            debug.server = nullptr;
+        } else {
+            debug.server->setEditCallback(FMaterial::onEditCallback);
+            debug.server->setQueryCallback(FMaterial::onQueryCallback);
+        }
+    }
+#endif
+
+    JobSystem::setThreadName("FEngine::loop");
+    JobSystem::setThreadPriority(JobSystem::Priority::DISPLAY);
+
+    mDriver = platform->createDriver(mSharedGLContext);
     mDriverBarrier.latch();
     if (UTILS_UNLIKELY(!mDriver)) {
         // if we get here, it's because the driver couldn't be initialized and the problem has
@@ -359,31 +469,17 @@ int FEngine::loop() {
         return 0;
     }
 
-    JobSystem::setThreadName("FEngine::loop");
-    JobSystem::setThreadPriority(JobSystem::Priority::DISPLAY);
+    // We use the highest affinity bit, assuming this is a Big core in a  big.little
+    // configuration. This is also a core not used by the JobSystem.
+    // Either way the main reason to do this is to avoid this thread jumping from core to core
+    // and loose its caches in the process.
+    uint32_t id = std::thread::hardware_concurrency() - 1;
 
-    // FIXME: we should do this based on the CPUs we actually have
-    uint32_t affinityMask = (std::thread::hardware_concurrency() >= 6) ? 0xF0 : 0;
-
-    auto& commandBufferQueue = mCommandBufferQueue;
     while (true) {
-        // wait until we get command buffers to be executed (or thread exit requested)
-        auto buffers = commandBufferQueue.waitForCommands();
-        if (UTILS_UNLIKELY(!buffers.size())) {
+        // looks like thread affinity needs to be reset regularly (on Android)
+        JobSystem::setThreadAffinityById(id);
+        if (!execute()) {
             break;
-        }
-
-        if (affinityMask) {
-            // looks like thread affinity needs to be reset regularly (on Android)
-            JobSystem::setThreadAffinity(affinityMask);
-        }
-
-        // execute all command buffers
-        for (auto& item : buffers) {
-            if (UTILS_LIKELY(item.begin)) {
-                mCommandStream.execute(item.begin);
-                mCommandBufferQueue.releaseBuffer(item);
-            }
         }
     }
 
@@ -397,56 +493,14 @@ void FEngine::flushCommandBuffer(CommandBufferQueue& commandQueue) {
     commandQueue.flush();
 }
 
-const FMaterial* FEngine::getSkyboxMaterial(driver::TextureFormat format) const noexcept {
-    size_t index = (format == driver::TextureFormat::RGBM) ? 0 : 1;
-    FMaterial const* material = mSkyboxMaterials[index];
+const FMaterial* FEngine::getSkyboxMaterial() const noexcept {
+    FMaterial const* material = mSkyboxMaterial;
     if (UTILS_UNLIKELY(material == nullptr)) {
-        material = FSkybox::createMaterial(*const_cast<FEngine*>(this), format);
-        mSkyboxMaterials[index] = material;
+        material = FSkybox::createMaterial(*const_cast<FEngine*>(this));
+        mSkyboxMaterial = material;
     }
     return material;
 }
-
-
-Handle<HwProgram> FEngine::createPostProcessProgram(MaterialParser& parser,
-        ShaderModel shaderModel, PostProcessStage stage) const noexcept {
-    ShaderBuilder vShaderBuilder;
-    ShaderBuilder fShaderBuilder;
-    parser.getShader(shaderModel, (uint8_t) stage, ShaderType::VERTEX, vShaderBuilder);
-    parser.getShader(shaderModel, (uint8_t) stage, ShaderType::FRAGMENT, fShaderBuilder);
-
-    // For the post-process program, we don't care about per-material sampler bindings but we still
-    // need to populate a SamplerBindingMap and pass a weak reference to Program. Binding maps are
-    // normally owned by Material, but in this case we'll simply own a copy right here in static
-    // storage.
-    static const SamplerBindingMap* pBindings = [] {
-        static SamplerBindingMap bindings;
-        bindings.populate();
-        return &bindings;
-    }();
-
-    Program pb;
-    pb      .diagnostics(CString("Post Process"))
-            .withSamplerBindings(pBindings)
-            .withVertexShader(CString(vShaderBuilder.getShader(), vShaderBuilder.size()))
-            .withFragmentShader(CString(fShaderBuilder.getShader(), fShaderBuilder.size()))
-            .addUniformBlock(BindingPoints::PER_VIEW, &UibGenerator::getPerViewUib())
-            .addUniformBlock(BindingPoints::POST_PROCESS, &UibGenerator::getPostProcessingUib())
-            .addSamplerBlock(BindingPoints::POST_PROCESS, &SibGenerator::getPostProcessSib());
-    auto program = const_cast<DriverApi&>(mCommandStream).createProgram(std::move(pb));
-    assert(program);
-    return program;
-}
-
-Handle<HwProgram> FEngine::getPostProcessProgramSlow(PostProcessStage stage) const noexcept {
-    Handle<HwProgram>* const postProcessPrograms = mPostProcessPrograms;
-    if (!postProcessPrograms[(uint8_t)stage]) {
-        ShaderModel shaderModel = getDriver().getShaderModel();
-        postProcessPrograms[(uint8_t)stage] = createPostProcessProgram(*mPostProcessParser, shaderModel, stage);
-    }
-    return postProcessPrograms[(uint8_t)stage];
-}
-
 
 // -----------------------------------------------------------------------------------------------
 // Resource management
@@ -491,6 +545,10 @@ FStream* FEngine::createStream(const Stream::Builder& builder) noexcept {
     return create(mStreams, builder);
 }
 
+FRenderTarget* FEngine::createRenderTarget(const RenderTarget::Builder& builder) noexcept {
+    return create(mRenderTargets, builder);
+}
+
 /*
  * Special cases
  */
@@ -533,7 +591,7 @@ FView* FEngine::createView() noexcept {
     return p;
 }
 
-FFence* FEngine::createFence(Fence::Type type) noexcept {
+FFence* FEngine::createFence(FFence::Type type) noexcept {
     FFence* p = mHeapAllocator.make<FFence>(*this, type);
     if (p) {
         mFences.insert(p);
@@ -549,6 +607,14 @@ FSwapChain* FEngine::createSwapChain(void* nativeWindow, uint64_t flags) noexcep
     return p;
 }
 
+FSwapChain* FEngine::createSwapChain(uint32_t width, uint32_t height, uint64_t flags) noexcept {
+    FSwapChain* p = mHeapAllocator.make<FSwapChain>(*this, width, height, flags);
+    if (p) {
+        mSwapChains.insert(p);
+    }
+    return p;
+}
+
 /*
  * Objects created with a component manager
  */
@@ -557,6 +623,16 @@ FSwapChain* FEngine::createSwapChain(void* nativeWindow, uint64_t flags) noexcep
 FCamera* FEngine::createCamera(Entity entity) noexcept {
     return mCameraManager.create(entity);
 }
+
+FCamera* FEngine::getCameraComponent(Entity entity) noexcept {
+    auto ci = mCameraManager.getInstance(entity);
+    return ci ? mCameraManager.getCamera(ci) : nullptr;
+}
+
+void FEngine::destroyCameraComponent(utils::Entity entity) noexcept {
+    mCameraManager.destroy(entity);
+}
+
 
 void FEngine::createRenderable(const RenderableManager::Builder& builder, Entity entity) {
     mRenderableManager.create(builder, entity);
@@ -637,6 +713,10 @@ void FEngine::destroy(const FTexture* p) {
     terminateAndDestroy(p, mTextures);
 }
 
+void FEngine::destroy(const FRenderTarget* p) {
+    terminateAndDestroy(p, mRenderTargets);
+}
+
 inline void FEngine::destroy(const FView* p) {
     terminateAndDestroy(p, mViews);
 }
@@ -659,11 +739,11 @@ void FEngine::destroy(const FStream* p) {
 }
 
 
-inline void FEngine::destroy(const FMaterial* ptr) {
+void FEngine::destroy(const FMaterial* ptr) {
     if (ptr != nullptr) {
         auto pos = mMaterialInstances.find(ptr);
         if (pos != mMaterialInstances.cend()) {
-            // we've destroyed the material before destroying all its instances
+            // ensure we've destroyed all instances before destroying the material
             if (!ASSERT_PRECONDITION_NON_FATAL(pos->second.empty(),
                     "destroying material \"%s\" but %u instances still alive",
                     ptr->getName().c_str(), (*pos).second.size())) {
@@ -674,7 +754,7 @@ inline void FEngine::destroy(const FMaterial* ptr) {
     }
 }
 
-inline void FEngine::destroy(const FMaterialInstance* ptr) {
+void FEngine::destroy(const FMaterialInstance* ptr) {
     if (ptr != nullptr) {
         auto pos = mMaterialInstances.find(ptr->getMaterial());
         assert(pos != mMaterialInstances.cend());
@@ -699,31 +779,33 @@ void* FEngine::streamAlloc(size_t size, size_t alignment) noexcept {
     return getDriverApi().allocate(size, alignment);
 }
 
-// ---------------------------------------------------------------------------------------------
+bool FEngine::execute() {
 
-EnginePerformanceTest::~EnginePerformanceTest() noexcept = default;
+    // wait until we get command buffers to be executed (or thread exit requested)
+    auto buffers = mCommandBufferQueue.waitForCommands();
+    if (UTILS_UNLIKELY(buffers.empty())) {
+        return false;
+    }
 
-class FEnginePerformanceTest : public EnginePerformanceTest {
-public:
-    void activateOmegaThirteen() noexcept { }
-};
+    // execute all command buffers
+    for (auto& item : buffers) {
+        if (UTILS_LIKELY(item.begin)) {
+            mCommandStream.execute(item.begin);
+            mCommandBufferQueue.releaseBuffer(item);
+        }
+    }
 
-FILAMENT_UPCAST(EnginePerformanceTest)
-
-void EnginePerformanceTest::activateOmegaThirteen() noexcept {
-    upcast(this)->activateOmegaThirteen();
+    return true;
 }
 
-void EnginePerformanceTest::activateBigBang() noexcept {
+void FEngine::destroy(FEngine* engine) {
+    if (engine) {
+        std::unique_ptr<FEngine> filamentEngine = sEngines.remove(engine);
+        if (filamentEngine) {
+            filamentEngine->shutdown();
+        }
+    }
 }
-
-static void destroyUniverse(void *) {
-}
-
-EnginePerformanceTest::PFN EnginePerformanceTest::getDestroyUniverseApi() {
-    return &destroyUniverse;
-}
-
 
 } // namespace details
 
@@ -733,37 +815,19 @@ EnginePerformanceTest::PFN EnginePerformanceTest::getDestroyUniverseApi() {
 
 using namespace details;
 
-Engine* Engine::create(Backend backend, ExternalContext* externalContext, void* sharedGLContext) {
-    std::unique_ptr<FEngine> engine(FEngine::create(backend, externalContext, sharedGLContext));
-    if (UTILS_UNLIKELY(!engine)) {
-        // something went wrong during the driver or engine initialization
-        return nullptr;
-    }
-
-    std::lock_guard<std::mutex> guard(sEnginesLock);
-    Engine* handle = engine.get();
-    sEngines[handle] = std::move(engine);
-    return handle;
+Engine* Engine::create(Backend backend, Platform* platform, void* sharedGLContext) {
+    return FEngine::create(backend, platform, sharedGLContext);
 }
 
-void Engine::destroy(Engine** engine) {
-    if (engine) {
-        std::unique_ptr<FEngine> filamentEngine;
+void Engine::destroy(Engine* engine) {
+    FEngine::destroy(upcast(engine));
+}
 
-        std::unique_lock<std::mutex> guard(sEnginesLock);
-        auto const& pos = sEngines.find(*engine);
-        if (pos != sEngines.end()) {
-            std::swap(filamentEngine, pos->second);
-            sEngines.erase(pos);
-        }
-        guard.unlock();
-
-        // Make sure to call into shutdown() without the lock held
-        if (filamentEngine) {
-            filamentEngine->shutdown();
-            // clear the user's handle
-            *engine = nullptr;
-        }
+void Engine::destroy(Engine** pEngine) {
+    if (pEngine) {
+        Engine* engine = *pEngine;
+        FEngine::destroy(upcast(engine));
+        *pEngine = nullptr;
     }
 }
 
@@ -773,6 +837,10 @@ void Engine::destroy(Engine** engine) {
 
 const Material* Engine::getDefaultMaterial() const noexcept {
     return upcast(this)->getDefaultMaterial();
+}
+
+Backend Engine::getBackend() const noexcept {
+    return upcast(this)->getBackend();
 }
 
 Renderer* Engine::createRenderer() noexcept {
@@ -791,12 +859,24 @@ Camera* Engine::createCamera(Entity entity) noexcept {
     return upcast(this)->createCamera(entity);
 }
 
-Fence* Engine::createFence(Fence::Type type) noexcept {
-    return upcast(this)->createFence(type);
+Camera* Engine::getCameraComponent(utils::Entity entity) noexcept {
+    return upcast(this)->getCameraComponent(entity);
+}
+
+void Engine::destroyCameraComponent(utils::Entity entity) noexcept {
+    upcast(this)->destroyCameraComponent(entity);
+}
+
+Fence* Engine::createFence() noexcept {
+    return upcast(this)->createFence(FFence::Type::SOFT);
 }
 
 SwapChain* Engine::createSwapChain(void* nativeWindow, uint64_t flags) noexcept {
     return upcast(this)->createSwapChain(nativeWindow, flags);
+}
+
+SwapChain* Engine::createSwapChain(uint32_t width, uint32_t height, uint64_t flags) noexcept {
+    return upcast(this)->createSwapChain(width, height, flags);
 }
 
 void Engine::destroy(const VertexBuffer* p) {
@@ -843,6 +923,10 @@ void Engine::destroy(const Texture* p) {
     upcast(this)->destroy(upcast(p));
 }
 
+void Engine::destroy(const RenderTarget* p) {
+    upcast(this)->destroy(upcast(p));
+}
+
 void Engine::destroy(const Fence* p) {
     upcast(this)->destroy(upcast(p));
 }
@@ -853,6 +937,10 @@ void Engine::destroy(const SwapChain* p) {
 
 void Engine::destroy(Entity e) {
     upcast(this)->destroy(e);
+}
+
+void Engine::flushAndWait() {
+    upcast(this)->flushAndWait();
 }
 
 RenderableManager& Engine::getRenderableManager() noexcept {
@@ -869,6 +957,14 @@ TransformManager& Engine::getTransformManager() noexcept {
 
 void* Engine::streamAlloc(size_t size, size_t alignment) noexcept {
     return upcast(this)->streamAlloc(size, alignment);
+}
+
+// The external-facing execute does a flush, and is meant only for single-threaded environments.
+// It also discards the boolean return value, which would otherwise indicate a thread exit.
+void Engine::execute() {
+    ASSERT_PRECONDITION(!UTILS_HAS_THREADING, "Execute is meant for single-threaded platforms.");
+    upcast(this)->flush();
+    upcast(this)->execute();
 }
 
 DebugRegistry& Engine::getDebugRegistry() noexcept {

@@ -16,9 +16,9 @@
 
 package com.google.android.filament.tungsten.properties
 
-import com.google.android.filament.tungsten.model.Float3
 import com.google.android.filament.tungsten.model.Node
 import com.google.android.filament.tungsten.model.NodeId
+import com.google.android.filament.tungsten.model.copyPropertyWithValue
 import javax.swing.JPanel
 
 class PropertiesPanel : JPanel() {
@@ -45,7 +45,8 @@ class PropertiesPanel : JPanel() {
         for ((property, editor) in node.properties.zip(editors)) {
             editor.setValue(property.value)
             editor.valueChanged = { newValue ->
-                p.propertyChanged(node.id, property.name, newValue)
+                p.propertyChanged(node.getPropertyHandle(property.name),
+                        copyPropertyWithValue(property, newValue))
             }
             add(editor.component)
         }
@@ -59,12 +60,7 @@ class PropertiesPanel : JPanel() {
      */
     private fun createEditorsForNode(node: Node) {
         editorCache.computeIfAbsent(node.id) { _ ->
-            node.properties.map { (_, value) ->
-                when (value) {
-                    // Each PropertyValue type has a 1:1 mapping to a PropertyEditor
-                    is Float3 -> ColorChooser(value)
-                }
-            }
+            node.properties.map { it.callEditorFactory() }
         }
     }
 }

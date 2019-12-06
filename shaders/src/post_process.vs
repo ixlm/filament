@@ -1,26 +1,35 @@
-
-LAYOUT_LOCATION(LOCATION_POSITION) in vec4 position;
-
-LAYOUT_LOCATION(0) out vec2 vertex_uv;
-
 void main() {
-    vertex_uv = (position.xy * 0.5 + 0.5) * frameUniforms.resolution.xy;
+    // Initialize the vertex shader inputs to sensible default values.
+    PostProcessVertexInputs inputs;
+    initPostProcessMaterialVertex(inputs);
 
-#if defined(TARGET_VULKAN_ENVIRONMENT)
-    // In Vulkan, drawing the top row of pixels occurs when position.y = -1.0, but we're
-    // sampling from a rectangle the sits in the lower-left corner of the texture. Therefore
-    // we need to apply an offset to get the correct texture coordinate.
-    //
-    // For example, if the sampled area height is 180 and the texture height is 200,
-    // we need to sample the texture in the range [20,200) rather than [0,180).
-    vertex_uv.y += postProcessUniforms.yOffset;
+    inputs.normalizedUV = position.xy * 0.5 + 0.5;
+    inputs.texelCoords = inputs.normalizedUV * frameUniforms.resolution.xy;
+
+// In Vulkan and Metal, texture coords are Y-down. In OpenGL, texture coords are Y-up.
+#if defined(TARGET_METAL_ENVIRONMENT) || defined(TARGET_VULKAN_ENVIRONMENT)
+    inputs.texelCoords.y = frameUniforms.resolution.y - 1.0 - inputs.texelCoords.y;
+    inputs.normalizedUV.y = 1.0 - inputs.normalizedUV.y;
 #endif
 
-#if POST_PROCESS_ANTI_ALIASING
-    // Account for the texture actual size
-    vertex_uv *= postProcessUniforms.uvScale;
-    // Compute texel center
-    vertex_uv = (floor(vertex_uv) + vec2(0.5, 0.5)) * frameUniforms.resolution.zw;
+    gl_Position = getPosition();
+
+    // Invoke user code
+    postProcessVertex(inputs);
+
+    vertex_uv = inputs.texelCoords;
+
+    // Handle user-defined interpolated attributes
+#if defined(VARIABLE_CUSTOM0)
+    VARIABLE_CUSTOM_AT0 = inputs.VARIABLE_CUSTOM0;
 #endif
-    gl_Position = position;
+#if defined(VARIABLE_CUSTOM1)
+    VARIABLE_CUSTOM_AT1 = inputs.VARIABLE_CUSTOM1;
+#endif
+#if defined(VARIABLE_CUSTOM2)
+    VARIABLE_CUSTOM_AT2 = inputs.VARIABLE_CUSTOM2;
+#endif
+#if defined(VARIABLE_CUSTOM3)
+    VARIABLE_CUSTOM_AT3 = inputs.VARIABLE_CUSTOM3;
+#endif
 }

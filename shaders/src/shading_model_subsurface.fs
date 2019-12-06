@@ -8,21 +8,21 @@
 vec3 surfaceShading(const PixelParams pixel, const Light light, float occlusion) {
     vec3 h = normalize(shading_view + light.l);
 
-    float NoL = saturate(dot(shading_normal, light.l));
+    float NoL = light.NoL;
     float NoH = saturate(dot(shading_normal, h));
     float LoH = saturate(dot(light.l, h));
 
     vec3 Fr = vec3(0.0);
     if (NoL > 0.0) {
         // specular BRDF
-        float D = distribution(pixel.linearRoughness, NoH, h);
-        float V = visibility(pixel.roughness, pixel.linearRoughness, shading_NoV, NoL, LoH);
+        float D = distribution(pixel.roughness, NoH, h);
+        float V = visibility(pixel.roughness, shading_NoV, NoL);
         vec3  F = fresnel(pixel.f0, LoH);
         Fr = (D * V) * F * pixel.energyCompensation;
     }
 
     // diffuse BRDF
-    vec3 Fd = pixel.diffuseColor * diffuse(pixel.linearRoughness, shading_NoV, NoL, LoH);
+    vec3 Fd = pixel.diffuseColor * diffuse(pixel.roughness, shading_NoV, NoL, LoH);
 
     // NoL does not apply to transmitted light
     vec3 color = (Fd + Fr) * (NoL * occlusion);

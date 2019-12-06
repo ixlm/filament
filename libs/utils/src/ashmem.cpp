@@ -15,10 +15,13 @@
  */
 
 #include <utils/ashmem.h>
+#include <utils/api_level.h>
 
 #include <errno.h>
 #include <assert.h>
 #include <stdio.h>
+
+#include <utils/Path.h>
 
 #if defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
 #   include <fcntl.h>
@@ -40,19 +43,30 @@
 #   include <sys/ioctl.h>
 #   include <sys/stat.h>
 #   include <memory.h>
+#   include <dlfcn.h>
 #   include <linux/ashmem.h>
-#   define ASHMEM_DEVICE "/dev/ashmem"
+#   include <android/api-level.h>
+#   include <android/sharedmem.h>
 #endif
 
 namespace utils {
 
 #ifdef ANDROID
 
+#if __ANDROID_API__ >= 26
+
+// Starting with API 26 (Oreo) we have ASharedMemory
+int ashmem_create_region(const char *name, size_t size) {
+    return ASharedMemory_create(name, size);
+}
+
+#else
+
 static int __ashmem_open() {
     int ret;
     struct stat st;
 
-    int fd = open(ASHMEM_DEVICE, O_RDWR);
+    int fd = open("/dev/ashmem", O_RDWR);
     if (fd < 0) {
         return fd;
     }
@@ -74,8 +88,18 @@ static int __ashmem_open() {
 }
 
 int ashmem_create_region(const char *name, size_t size) {
-    int ret, save_errno;
+    // Fetch the API level to avoid dlsym() on API 19
+    if (api_level() >= 26) {
+        // dynamically check if we have "ASharedMemory_create" (should be the case since 26 (Oreo))
+        using TASharedMemory_create = int(*)(const char *name, size_t size);
+        TASharedMemory_create pfnASharedMemory_create =
+                (TASharedMemory_create)dlsym(RTLD_DEFAULT, "ASharedMemory_create");
+        if (pfnASharedMemory_create) {
+            return pfnASharedMemory_create(name, size);
+        }
+    }
 
+    int ret, save_errno;
     int fd = __ashmem_open();
     if (fd < 0) {
         return fd;
@@ -105,11 +129,14 @@ error:
     return ret;
 }
 
+#endif // __ANDROID_API__ >= 26
+
 #elif defined(__unix__) || (defined(__APPLE__) && defined(__MACH__))
 
 int ashmem_create_region(const char*, size_t size) {
     char template_path[512];
-    snprintf(template_path, sizeof(template_path), "/tmp/filament-ashmem-%d-XXXXXXXXX", getpid());
+    snprintf(template_path, sizeof(template_path), "%s/filament-ashmem-%d-XXXXXXXXX",
+            Path::getTemporaryDirectory().c_str(), getpid());
     int fd = mkstemp(template_path);
     if (fd == -1) return -1;
     unlink(template_path);
@@ -123,8 +150,8 @@ int ashmem_create_region(const char*, size_t size) {
 #else
 int ashmem_create_region(const char*, size_t size) {
     char template_path[512];
-    snprintf(template_path, sizeof(template_path), "/tmp/filament-ashmem-%lu-XXXXXXXXX", 
-            GetCurrentProcessId());
+    snprintf(template_path, sizeof(template_path), "%s/filament-ashmem-%lu-XXXXXXXXX",
+            Path::getTemporaryDirectory().c_str(), GetCurrentProcessId());
     const char* tmpPath = _mktemp(template_path);
     int fd = _open(tmpPath, _O_BINARY);
     if (fd == -1) return -1;

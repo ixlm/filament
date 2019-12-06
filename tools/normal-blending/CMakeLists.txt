@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.1)
+cmake_minimum_required(VERSION 3.10)
 project(normal-blending)
 
 set(TARGET normal-blending)
@@ -36,3 +36,4 @@ target_include_directories(${TARGET} PRIVATE ${GENERATION_ROOT})
 # Installation
 # ==================================================================================================
 install(TARGETS ${TARGET} RUNTIME DESTINATION bin)
+install(FILES "README.md" DESTINATION docs/ RENAME "${TARGET}.md")

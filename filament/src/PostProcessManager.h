@@ -17,62 +17,102 @@
 #ifndef TNT_FILAMENT_POSTPROCESS_MANAGER_H
 #define TNT_FILAMENT_POSTPROCESS_MANAGER_H
 
-#include "RenderTargetPool.h"
+#include "UniformBuffer.h"
 
-#include "driver/DriverApiForward.h"
-#include "driver/UniformBuffer.h"
-#include "driver/Handle.h"
+#include "private/backend/DriverApiForward.h"
 
-#include <filament/Viewport.h>
+#include "fg/FrameGraphHandle.h"
 
-#include <filament/driver/DriverEnums.h>
-
-#include <vector>
+#include <backend/DriverEnums.h>
+#include <filament/View.h>
 
 namespace filament {
 
 namespace details {
+class FMaterial;
+class FMaterialInstance;
 class FEngine;
 class FView;
+class RenderPass;
+struct CameraInfo;
 } // namespace details
 
 class PostProcessManager {
 public:
-    void init(details::FEngine& engine) noexcept;
-    void terminate(driver::DriverApi& driver) noexcept;
-    void setSource(uint32_t viewportWidth, uint32_t viewportHeight,
-            const RenderTargetPool::Target* pos) const noexcept;
+    explicit PostProcessManager(details::FEngine& engine) noexcept;
 
-    // start() is a scam, it does nothing
-    void start() noexcept { }
+    void init() noexcept;
+    void terminate(backend::DriverApi& driver) noexcept;
 
-    // a fullscreen pass, using the given format as target and writing into the specified program
-    void pass(driver::TextureFormat format, Handle<HwProgram> program) noexcept;
+    FrameGraphId <FrameGraphTexture> toneMapping(FrameGraph& fg,
+            FrameGraphId <FrameGraphTexture> input,
+            backend::TextureFormat outFormat, bool dithering, bool translucent, bool fxaa) noexcept;
 
-    // a blit pass, using the given format as target
-    void blit(driver::TextureFormat format = driver::TextureFormat::RGBA8) noexcept;
+    FrameGraphId<FrameGraphTexture> fxaa(FrameGraph& fg,
+            FrameGraphId<FrameGraphTexture> input, backend::TextureFormat outFormat,
+            bool translucent) noexcept;
 
-    void finish(driver::TargetBufferFlags discarded,
-            Handle<HwRenderTarget> viewRenderTarget,
-            Viewport const& vp,
-            RenderTargetPool::Target const* linearTarget,
-            Viewport const& svp);
+    FrameGraphId <FrameGraphTexture> dynamicScaling(
+            FrameGraph& fg, uint8_t msaa, bool scaled, bool blend,
+            FrameGraphId <FrameGraphTexture> input,
+            backend::TextureFormat outFormat) noexcept;
 
+    FrameGraphId<FrameGraphTexture> ssao(FrameGraph& fg, details::RenderPass& pass,
+            filament::Viewport const& svp,
+            details::CameraInfo const& cameraInfo,
+            View::AmbientOcclusionOptions const& options) noexcept;
+
+    backend::Handle<backend::HwTexture> getNoSSAOTexture() const {
+        return mNoSSAOTexture;
+    }
 
 private:
-    details::FEngine* mEngine = nullptr;
+    details::FEngine& mEngine;
 
-    struct Command {
-        Handle<HwProgram> program = {};
-        driver::TextureFormat format;
+    FrameGraphId<FrameGraphTexture> depthPass(FrameGraph& fg, details::RenderPass& pass,
+            uint32_t width, uint32_t height, View::AmbientOcclusionOptions const& options) noexcept;
+
+    FrameGraphId<FrameGraphTexture> mipmapPass(FrameGraph& fg,
+            FrameGraphId<FrameGraphTexture> input, size_t level) noexcept;
+
+    FrameGraphId<FrameGraphTexture> blurPass(FrameGraph& fg,
+            FrameGraphId<FrameGraphTexture> input,
+            FrameGraphId<FrameGraphTexture> depth, math::int2 axis) noexcept;
+
+    class PostProcessMaterial {
+    public:
+        PostProcessMaterial() noexcept = default;
+        PostProcessMaterial(details::FEngine& engine, uint8_t const* data, size_t size) noexcept;
+
+        PostProcessMaterial(PostProcessMaterial const& rhs) = delete;
+        PostProcessMaterial& operator=(PostProcessMaterial const& rhs) = delete;
+
+        PostProcessMaterial(PostProcessMaterial&& rhs) noexcept;
+        PostProcessMaterial& operator=(PostProcessMaterial&& rhs) noexcept;
+
+        ~PostProcessMaterial();
+
+        void terminate(details::FEngine& engine) noexcept;
+
+        details::FMaterial* getMaterial() const { return mMaterial; }
+        details::FMaterialInstance* getMaterialInstance() const { return mMaterialInstance; }
+        backend::Handle<backend::HwProgram> const& getProgram() const { return mProgram; }
+
+    private:
+        details::FMaterial* mMaterial = nullptr;
+        details::FMaterialInstance* mMaterialInstance = nullptr;
+        backend::Handle<backend::HwProgram> mProgram;
     };
 
-    std::vector<Command> mCommands;
+    PostProcessMaterial mSSAO;
+    PostProcessMaterial mMipmapDepth;
+    PostProcessMaterial mBlur;
+    PostProcessMaterial mBlit;
+    PostProcessMaterial mTonemapping;
+    PostProcessMaterial mFxaa;
 
-    // we need only one of these
-    mutable UniformBuffer mPostProcessUb;
-    Handle<HwSamplerBuffer> mPostProcessSbh;
-    Handle<HwUniformBuffer> mPostProcessUbh;
+    backend::Handle<backend::HwTexture> mNoSSAOTexture;
+    backend::Handle<backend::HwTexture> mNoiseTexture;
 };
 
 } // namespace filament

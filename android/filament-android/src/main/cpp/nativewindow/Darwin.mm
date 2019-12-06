@@ -17,13 +17,24 @@
 #include <stdio.h>
 
 #include <jawt.h>
+
+#if defined(__has_include)
+#if __has_include(<darwin/jawt_md.h>)
 #include <darwin/jawt_md.h>
+#else
+#include <jawt_md.h>
+#endif
+#else
+#include <darwin/jawt_md.h>
+#endif
 
 #include <filament/Engine.h>
 #include "JAWTUtils.h"
 
 #import <Cocoa/Cocoa.h>
 
+#pragma clang diagnostic push
+#pragma ide diagnostic ignored "NotReleasedValue"
 extern "C" {
 void *getNativeWindow(JNIEnv *env, jclass klass, jobject surface) {
     void *win = nullptr;
@@ -40,7 +51,7 @@ void *getNativeWindow(JNIEnv *env, jclass klass, jobject surface) {
     view.wantsLayer = true;
     [jawldsip setLayer:view.layer];
 
-    win = (void*)view;
+    win = (void*) view;
     releaseDrawingSurface(ds, dsi);
     return win;
 }
@@ -48,7 +59,7 @@ void *getNativeWindow(JNIEnv *env, jclass klass, jobject surface) {
 jlong createNativeSurface(jint width, jint height) {
     NSView *view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, width, height)];
     view.wantsLayer = true;
-    return (jlong)view;
+    return (jlong) view;
 }
 
 void destroyNativeSurface(jlong surface) {
@@ -57,3 +68,4 @@ void destroyNativeSurface(jlong surface) {
 }
 
 }
+#pragma clang diagnostic pop

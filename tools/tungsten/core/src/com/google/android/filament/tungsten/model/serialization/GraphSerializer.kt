@@ -20,6 +20,7 @@ import com.google.android.filament.tungsten.model.Connection
 import com.google.android.filament.tungsten.model.Graph
 import com.google.android.filament.tungsten.model.Node
 import com.google.android.filament.tungsten.model.NodeId
+import com.google.android.filament.tungsten.model.copyPropertyWithValue
 import java.awt.Point
 
 /**
@@ -42,7 +43,11 @@ object GraphSerializer {
         serializer: ISerializer = JsonSerializer()
     ): String {
         val nodesToSerialize = graph.nodes.map { n ->
-            NodeSchema(n.type, n.id, Point(n.x.toInt(), n.y.toInt()))
+            val properties = n.properties.mapNotNull {
+                val serialized = it.value.serialize()
+                if (serialized == null) null else it.name to serialized
+            }.toMap()
+            NodeSchema(n.type, n.id, Point(n.x.toInt(), n.y.toInt()), properties)
         }
 
         val connectionsToSerialize = graph.connections.map { c ->
@@ -69,7 +74,18 @@ object GraphSerializer {
         val nodesInGraph = nodes.mapNotNull { n ->
             val newNode = nodeFactory.createNodeForTypeIdentifier(n.type, n.id)
             val position = n.position ?: Point(0, 0)
-            newNode?.copy(x = position.x.toFloat(), y = position.y.toFloat())
+            if (newNode == null) return@mapNotNull null
+            // Allow properties specified in the serialized data to override default properties
+            // of the node.
+            val overridenProperties = newNode.properties.map { p ->
+                val override = n.properties?.get(p.name) ?: p
+                val newValue = p.value.deserialize(override)
+                copyPropertyWithValue(p, newValue)
+            }
+            newNode.copy(
+                    x = position.x.toFloat(),
+                    y = position.y.toFloat(),
+                    properties = overridenProperties)
         }
 
         val nodeMap = nodesInGraph.associateBy { n -> n.id }

@@ -53,6 +53,9 @@ public class LightManager {
         public float constantBias = 0.05f;
         public float normalBias = 0.4f;
         public float shadowFar = 0.0f;
+        public float shadowNearHint = 1.0f;
+        public float shadowFarHint = 100.0f;
+        public boolean stable = true;
     }
 
     public static final float EFFICIENCY_INCANDESCENT = 0.0220f;
@@ -79,7 +82,8 @@ public class LightManager {
         @NonNull
         public Builder shadowOptions(@NonNull ShadowOptions options) {
             nBuilderShadowOptions(mNativeBuilder,
-                    options.mapSize, options.constantBias, options.normalBias, options.shadowFar);
+                    options.mapSize, options.constantBias, options.normalBias, options.shadowFar,
+                    options.shadowNearHint, options.shadowFarHint, options.stable);
             return this;
         }
 
@@ -172,13 +176,18 @@ public class LightManager {
         }
     }
 
+    @NonNull
+    public Type getType(@EntityInstance int i) {
+        return Type.values()[nGetType(mNativeObject, i)];
+    }
+
     public void setPosition(@EntityInstance int i, float x, float y, float z) {
         nSetPosition(mNativeObject, i, x, y, z);
     }
 
     @NonNull
     public float[] getPosition(@EntityInstance int i, @Nullable @Size(min = 3) float[] out) {
-        out = assertFloat3(out);
+        out = Asserts.assertFloat3(out);
         nGetPosition(mNativeObject, i, out);
         return out;
     }
@@ -189,7 +198,7 @@ public class LightManager {
 
     @NonNull
     public float[] getDirection(@EntityInstance int i, @Nullable @Size(min = 3) float[] out) {
-        out = assertFloat3(out);
+        out = Asserts.assertFloat3(out);
         nGetDirection(mNativeObject, i, out);
         return out;
     }
@@ -200,7 +209,7 @@ public class LightManager {
 
     @NonNull
     public float[] getColor(@EntityInstance int i, @Nullable @Size(min = 3) float[] out) {
-        out = assertFloat3(out);
+        out = Asserts.assertFloat3(out);
         nGetColor(mNativeObject, i, out);
         return out;
     }
@@ -253,13 +262,16 @@ public class LightManager {
         return nGetSunHaloFalloff(mNativeObject, i);
     }
 
-    @NonNull @Size(min = 3)
-    private static float[] assertFloat3(@Nullable float[] out) {
-        if (out == null) out = new float[3];
-        else if (out.length < 3) {
-            throw new ArrayIndexOutOfBoundsException("Array length must be at least 3");
-        }
-        return out;
+    public void setShadowCaster(@EntityInstance int i, boolean shadowCaster) {
+        nSetShadowCaster(mNativeObject, i, shadowCaster);
+    }
+
+    public boolean isShadowCaster(@EntityInstance int i) {
+        return nIsShadowCaster(mNativeObject, i);
+    }
+
+    public long getNativeObject() {
+        return mNativeObject;
     }
 
     private static native boolean nHasComponent(long nativeLightManager, int entity);
@@ -270,7 +282,7 @@ public class LightManager {
     private static native void nDestroyBuilder(long nativeBuilder);
     private static native boolean nBuilderBuild(long nativeBuilder, long nativeEngine, int entity);
     private static native void nBuilderCastShadows(long nativeBuilder, boolean enable);
-    private static native void nBuilderShadowOptions(long nativeBuilder, int mapSize, float constantBias, float normalBias, float shadowFar);
+    private static native void nBuilderShadowOptions(long nativeBuilder, int mapSize, float constantBias, float normalBias, float shadowFar, float shadowNearHint, float shadowFarhint, boolean stable);
     private static native void nBuilderCastLight(long nativeBuilder, boolean enabled);
     private static native void nBuilderPosition(long nativeBuilder, float x, float y, float z);
     private static native void nBuilderDirection(long nativeBuilder, float x, float y, float z);
@@ -283,6 +295,7 @@ public class LightManager {
     private static native void nBuilderHaloSize(long nativeBuilder, float haloSize);
     private static native void nBuilderHaloFalloff(long nativeBuilder, float haloFalloff);
 
+    private static native int nGetType(long nativeLightManager, int i);
     private static native void nSetPosition(long nativeLightManager, int i, float x, float y, float z);
     private static native void nGetPosition(long nativeLightManager, int i, float[] out);
     private static native void nSetDirection(long nativeLightManager, int i, float x, float y, float z);
@@ -301,4 +314,6 @@ public class LightManager {
     private static native float nGetSunHaloSize(long nativeLightManager, int i);
     private static native void nSetSunHaloFalloff(long nativeLightManager, int i, float haloFalloff);
     private static native float nGetSunHaloFalloff(long nativeLightManager, int i);
+    private static native void nSetShadowCaster(long nativeLightManager, int i, boolean shadowCaster);
+    private static native boolean nIsShadowCaster(long nativeLightManager, int i);
 }

@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.1)
+cmake_minimum_required(VERSION 3.10)
 project(tinyexr)
 
 set(TARGET tinyexr)
@@ -21,6 +21,6 @@ add_library(${TARGET} STATIC ${PUBLIC_HDRS} ${SRCS})
 target_include_directories (${TARGET} PUBLIC ${PUBLIC_HDR_DIR})
 target_link_libraries(${TARGET} LINK_PUBLIC z)
 
-if (CLANG_CL)
+if (CLANG_CL AND NOT MSVC)
     target_compile_options(${TARGET} PRIVATE -Wno-unused-variable)
 endif()

@@ -19,8 +19,9 @@
 
 #include <filament/FilamentAPI.h>
 
-#include <filament/driver/DriverEnums.h>
-#include <filament/driver/PixelBufferDescriptor.h>
+#include <backend/DriverEnums.h>
+
+#include <backend/PixelBufferDescriptor.h>
 
 #include <utils/compiler.h>
 
@@ -36,7 +37,18 @@ class UTILS_PUBLIC Stream : public FilamentAPI {
     struct BuilderDetails;
 
 public:
-    //! Use Builder to construct an Stream object instance
+    using Callback = backend::StreamCallback;
+    using StreamType = backend::StreamType;
+
+    /**
+     * Constructs a Stream object instance.
+     *
+     * By default, Stream objects are ACQUIRED and must have external images pushed to them via
+     * <pre>Stream::setAcquiredImage</pre>.
+     *
+     * To create a NATIVE or TEXTURE_ID stream, call one of the <pre>stream</pre> methods
+     * on the builder.
+     */
     class Builder : public BuilderBase<BuilderDetails> {
         friend struct BuilderDetails;
     public:
@@ -48,7 +60,7 @@ public:
         Builder& operator=(Builder&& rhs) noexcept;
 
         /**
-         * Creates a native stream. Native streams can sample data directly from an
+         * Creates a NATIVE stream. Native streams can sample data directly from an
          * opaque platform object such as a SurfaceTexture on Android.
          *
          * @param stream An opaque native stream handle. e.g.: on Android this is an
@@ -59,7 +71,7 @@ public:
         Builder& stream(void* stream) noexcept;
 
         /**
-         * Creates a copy stream. A copy stream will sample data from the supplied
+         * Creates a TEXTURE_ID stream. This will sample data from the supplied
          * external texture and copy it into an internal private texture.
          *
          * @param externalTextureId An opaque texture id (typically a GLuint created with glGenTextures)
@@ -106,9 +118,17 @@ public:
     };
 
     /**
-     * Indicates whether this stream is a native stream or a copy stream.
+     * Indicates whether this stream is a NATIVE stream, TEXTURE_ID stream, or ACQUIRED stream.
      */
-    bool isNativeStream() const noexcept;
+    StreamType getStreamType() const noexcept;
+
+    /**
+     * Updates an ACQUIRED stream with an image that is guaranteed to be used in the next frame.
+     *
+     * This method should be called on the same thread that calls Renderer::beginFrame, which is
+     * also where the callback is invoked.
+     */
+    void setAcquiredImage(void* image, Callback callback, void* userdata) noexcept;
 
     /**
      * Updates the size of the incoming stream. Whether this value is used is
@@ -133,14 +153,14 @@ public:
      * @param buffer    Client-side buffer where the read-back will be written.
      *
      *                  The following format are always supported:
-     *                      - driver::PixelDataFormat::RGBA
-     *                      - driver::PixelDataFormat::RGBA_INTEGER
+     *                      - PixelBufferDescriptor::PixelDataFormat::RGBA
+     *                      - PixelBufferDescriptor::PixelDataFormat::RGBA_INTEGER
      *
      *                  The following types are always supported:
-     *                      - driver::PixelDataType::UBYTE
-     *                      - driver::PixelDataType::UINT
-     *                      - driver::PixelDataType::INT
-     *                      - driver::PixelDataType::FLOAT
+     *                      - PixelBufferDescriptor::PixelDataType::UBYTE
+     *                      - PixelBufferDescriptor::PixelDataType::UINT
+     *                      - PixelBufferDescriptor::PixelDataType::INT
+     *                      - PixelBufferDescriptor::PixelDataType::FLOAT
      *
      *                  Other combination of format/type may be supported. If a combination is
      *                  not supported, this operation may fail silently. Use a DEBUG build
@@ -150,7 +170,7 @@ public:
      *  +--------------------+
      *  |                    |                .stride         .alignment
      *  |                    |         ----------------------->-->
-     *  |                    |         O----------------------+--+   low adresses
+     *  |                    |         O----------------------+--+   low addresses
      *  |                    |         |          |           |  |
      *  |             w      |         |          | .top      |  |
      *  |       <--------->  |         |          V           |  |
@@ -160,7 +180,7 @@ public:
      *  +------>|     v   |  |         +---->|         |      |  |
      *  |       +.........+  |         |     +.........+      |  |
      *  |            ^       |         |                      |  |
-     *  |          y |       |         +----------------------+--+  high adresses
+     *  |          y |       |         +----------------------+--+  high addresses
      *  O------------+-------+
      *
      * Typically readPixels() will be called after Renderer.beginFrame().
@@ -175,7 +195,16 @@ public:
      * readPixels() is intended for debugging and testing. It will impact performance significantly.
      */
     void readPixels(uint32_t xoffset, uint32_t yoffset, uint32_t width, uint32_t height,
-            driver::PixelBufferDescriptor&& buffer) noexcept;
+            backend::PixelBufferDescriptor&& buffer) noexcept;
+
+    /**
+     * Returns the presentation time of the currently displayed frame in nanosecond.
+     *
+     * This value can change at any time.
+     *
+     * @return timestamp in nanosecond.
+     */
+    int64_t getTimestamp() const noexcept;
 };
 
 } // namespace filament

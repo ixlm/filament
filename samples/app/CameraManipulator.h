@@ -22,49 +22,28 @@
 #include <math/vec4.h>
 #include <math/mat4.h>
 
-#include <filament/Camera.h>
-
 class CameraManipulator {
 public:
-    using Camera = filament::Camera;
-    using CameraChangedCallback = std::function<void(Camera const* c)>;
-
     CameraManipulator();
-    CameraManipulator(Camera* camera, size_t width, size_t height);
-
-    void setCameraChangedCallback(CameraChangedCallback cb);
-
-    void setCamera(Camera* camera);
-    Camera const* getCamera() const {
-        return mCamera;
-    }
+    CameraManipulator(size_t width, size_t height);
 
     void setViewport(size_t w, size_t h);
 
-    void lookAt(const math::double3& eye, const math::double3& at);
-    void track(const math::double2& delta);
+    void lookAt(const filament::math::double3& eye, const filament::math::double3& at);
+    void track(const filament::math::double2& delta);
     void dolly(double delta, double dollySpeed = 5.0);
-    void rotate(const math::double2& delta, double rotateSpeed = 7.0);
+    void rotate(const filament::math::double2& delta, double rotateSpeed = 7.0);
 
-    void updateCameraTransform();
+    filament::math::mat4f getCameraTransform() const;
 
 private:
-    void updateCameraProjection();
-
-    Camera* mCamera = nullptr;
-
-    math::double3 mRotation;
-    math::double3 mTranslation;
+    filament::math::double3 mRotation;
+    filament::math::double3 mTranslation;
 
     double mCenterOfInterest = 10.0;
     double mFovx = 65.0;
-    double mClipNear = 0.1;
-    double mClipFar = 11.0;
     size_t mWidth;
     size_t mHeight;
-    double mAspect = 1.0f;
-
-    std::function<void(Camera const* c)> mCameraChanged;
 };
 
 #endif // TNT_FILAMENT_SAMPLE_CAMERA_MANIPULATOR_H

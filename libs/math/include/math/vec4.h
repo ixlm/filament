@@ -23,18 +23,20 @@
 #include <sys/types.h>
 
 
+namespace filament {
 namespace math {
 // -------------------------------------------------------------------------------------
 
 namespace details {
 
-template <typename T>
-class MATH_EMPTY_BASES TVec4 :  public TVecProductOperators<TVec4, T>,
-                public TVecAddOperators<TVec4, T>,
-                public TVecUnaryOperators<TVec4, T>,
-                public TVecComparisonOperators<TVec4, T>,
-                public TVecFunctions<TVec4, T>,
-                public TVecDebug<TVec4, T> {
+template<typename T>
+class MATH_EMPTY_BASES TVec4 :
+        public TVecProductOperators<TVec4, T>,
+        public TVecAddOperators<TVec4, T>,
+        public TVecUnaryOperators<TVec4, T>,
+        public TVecComparisonOperators<TVec4, T>,
+        public TVecFunctions<TVec4, T>,
+        public TVecDebug<TVec4, T> {
 public:
     typedef T value_type;
     typedef T& reference;
@@ -43,7 +45,7 @@ public:
     static constexpr size_t SIZE = 4;
 
     union {
-        T v[SIZE];
+        T v[SIZE] MATH_CONSTEXPR_INIT;
         TVec2<T> xy, st, rg;
         TVec3<T> xyz, stp, rgb;
         struct {
@@ -67,13 +69,12 @@ public:
     inline constexpr size_type size() const { return SIZE; }
 
     // array access
-    inline constexpr T const& operator[](size_t i) const {
-        // only possible in C++0x14 with constexpr
+    inline constexpr T const& operator[](size_t i) const noexcept {
         assert(i < SIZE);
         return v[i];
     }
 
-    inline constexpr T& operator[](size_t i) {
+    inline constexpr T& operator[](size_t i) noexcept {
         assert(i < SIZE);
         return v[i];
     }
@@ -81,43 +82,52 @@ public:
     // constructors
 
     // default constructor
-    constexpr TVec4() = default;
+    MATH_DEFAULT_CTOR_CONSTEXPR TVec4() noexcept MATH_DEFAULT_CTOR
 
     // handles implicit conversion to a tvec4. must not be explicit.
-    template<typename A, typename = typename std::enable_if<std::is_arithmetic<A>::value >::type>
-    constexpr TVec4(A v) : x(v), y(v), z(v), w(v) { }
+    template<typename A, typename = enable_if_arithmetic_t<A>>
+    constexpr TVec4(A v) noexcept : v{ T(v), T(v), T(v), T(v) } {}
 
-    template<typename A, typename B, typename C, typename D>
-    constexpr TVec4(A x, B y, C z, D w) : x(x), y(y), z(z), w(w) { }
+    template<typename A, typename B, typename C, typename D,
+            typename = enable_if_arithmetic_t<A, B, C, D>>
+    constexpr TVec4(A x, B y, C z, D w) noexcept : v{ T(x), T(y), T(z), T(w) } {}
 
-    template<typename A, typename B, typename C>
-    constexpr TVec4(const TVec2<A>& v, B z, C w) : x(v.x), y(v.y), z(z), w(w) { }
+    template<typename A, typename B, typename C,
+            typename = enable_if_arithmetic_t<A, B, C>>
+    constexpr TVec4(const TVec2<A>& v, B z, C w) noexcept : v{ T(v[0]), T(v[1]), T(z), T(w) } {}
 
-    template<typename A, typename B>
-    constexpr TVec4(const TVec3<A>& v, B w) : x(v.x), y(v.y), z(v.z), w(w) { }
+    template<typename A, typename B, typename = enable_if_arithmetic_t<A, B>>
+    constexpr TVec4(const TVec2<A>& v, const TVec2<B>& w) noexcept : v{
+            T(v[0]), T(v[1]), T(w[0]), T(w[1]) } {}
 
-    template<typename A>
-    explicit
-    constexpr TVec4(const TVec4<A>& v) : x(v.x), y(v.y), z(v.z), w(v.w) { }
+    template<typename A, typename B, typename = enable_if_arithmetic_t<A, B>>
+    constexpr TVec4(const TVec3<A>& v, B w) noexcept : v{ T(v[0]), T(v[1]), T(v[2]), T(w) } {}
+
+    template<typename A, typename = enable_if_arithmetic_t<A>>
+    constexpr TVec4(const TVec4<A>& v) noexcept : v{ T(v[0]), T(v[1]), T(v[2]), T(v[3]) } {}
 };
 
 }  // namespace details
 
 // ----------------------------------------------------------------------------------------
 
-typedef details::TVec4<double> double4;
-typedef details::TVec4<float> float4;
-typedef details::TVec4<half> half4;
-typedef details::TVec4<int32_t> int4;
-typedef details::TVec4<uint32_t> uint4;
-typedef details::TVec4<int16_t> short4;
-typedef details::TVec4<uint16_t> ushort4;
-typedef details::TVec4<int8_t> byte4;
-typedef details::TVec4<uint8_t> ubyte4;
-typedef details::TVec4<bool> bool4;
+template<typename T, typename = details::enable_if_arithmetic_t<T>>
+using vec4 = details::TVec4<T>;
+
+using double4 = vec4<double>;
+using float4 = vec4<float>;
+using half4 = vec4<half>;
+using int4 = vec4<int32_t>;
+using uint4 = vec4<uint32_t>;
+using short4 = vec4<int16_t>;
+using ushort4 = vec4<uint16_t>;
+using byte4 = vec4<int8_t>;
+using ubyte4 = vec4<uint8_t>;
+using bool4 = vec4<bool>;
 
 
 // ----------------------------------------------------------------------------------------
 }  // namespace math
+}  // namespace filament
 
 #endif  // MATH_VEC4_H_

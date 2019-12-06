@@ -17,7 +17,10 @@
 #include <image/ImageSampler.h>
 #include <image/ImageOps.h>
 
+#include <math/scalar.h>
 #include <math/vec3.h>
+#include <math/vec4.h>
+
 #include <utils/Panic.h>
 #include <utils/CString.h>
 
@@ -35,7 +38,7 @@ struct FilterFunction {
     bool rejectExternalSamples = true;
 };
 
-constexpr float M_PIf = float(M_PI);
+constexpr float M_PIf = float(filament::math::F_PI);
 
 const FilterFunction Box {
     .fn = [](float t) { return t <= 0.5f ? 1.0f : 0.0f; },
@@ -204,12 +207,22 @@ FilterFunction createFilterFunction(Filter ftype) {
     return fn;
 }
 
-void normalize(LinearImage& image) {
-    ASSERT_PRECONDITION(image.getChannels() == 3, "Must be a 3-channel image.");
+template <class VecT>
+void normalizeImpl(LinearImage& image) {
     const uint32_t width = image.getWidth(), height = image.getHeight();
-    auto vecs = (math::float3*) image.getPixelRef();
+    auto vecs = (VecT*) image.getPixelRef();
     for (uint32_t n = 0; n < width * height; ++n) {
         vecs[n] = normalize(vecs[n]);
+    }
+}
+
+void normalize(LinearImage& image) {
+    ASSERT_PRECONDITION(image.getChannels() == 3 || image.getChannels() == 4,
+                        "Must be a 3 or 4 channel image");
+    if (image.getChannels() == 3) {
+      normalizeImpl< filament::math::float3>(image);
+    } else {
+      normalizeImpl< filament::math::float4>(image);
     }
 }
 
@@ -329,8 +342,8 @@ void generateMipmaps(const LinearImage& source, Filter filter, LinearImage* resu
     uint32_t width = source.getWidth();
     uint32_t height = source.getHeight();
     for (uint32_t n = 0; n < mips; ++n) {
-       width = std::max(width >> 1, 1u);
-       height = std::max(height >> 1, 1u);
+       width = std::max(width >> 1u, 1u);
+       height = std::max(height >> 1u, 1u);
        result[n] = resampleImage(source, width, height, filter);
     }
 }
@@ -341,8 +354,8 @@ uint32_t getMipmapCount(const LinearImage& source) {
     uint32_t count = 0;
     while (width > 1 || height > 1) {
         ++count;
-        width = std::max(width >> 1, 1u);
-        height = std::max(height >> 1, 1u);
+        width = std::max(width >> 1u, 1u);
+        height = std::max(height >> 1u, 1u);
     }
     return count;
 }
@@ -361,8 +374,8 @@ Filter filterFromString(const char* rawname) {
         { "MINIMUM", Filter::MINIMUM},
     };
     string name = rawname;
-    for (auto& c: name) c = toupper((unsigned char) c);
-    auto iter = map.find({ name.c_str(), name.size() });
+    for (auto& c: name) { c = toupper((unsigned char)c); }
+    auto iter = map.find(StaticString::make(name.c_str(), name.size()));
     return iter == map.end() ? Filter::DEFAULT : iter->second;
 }
 

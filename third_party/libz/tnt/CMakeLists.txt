@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.1)
+cmake_minimum_required(VERSION 3.10)
 project(z)
 
 set(OUR_DIR ${CMAKE_CURRENT_SOURCE_DIR}/..)
@@ -45,10 +45,12 @@ set(SRCS
     ${SRC_DIR}/zutil.c
 )
 
-add_definitions(
-    -Wno-implicit-function-declaration
-    -Wno-shift-negative-value
-)
+if (NOT MSVC)
+    add_definitions(
+        -Wno-implicit-function-declaration
+        -Wno-shift-negative-value
+    )
+endif()
 
 # we're building a library
 add_library(${TARGET} STATIC ${PRIVATE_HDRS} ${PUBLIC_HDRS} ${SRCS})
